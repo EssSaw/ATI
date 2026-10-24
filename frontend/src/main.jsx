@@ -1,7 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { defaults, example, preferences, providers, validateSettings } from './state.js';
+import { scheduleModelLoad } from './models.js';
 import './styles.css';
+import ProjectChat from './ProjectChat.jsx';
+import './project.css';
 
 function loadSettings() {
   try {
@@ -10,14 +13,15 @@ function loadSettings() {
     return ['direct', '9router'].includes(candidate.mode) && providers[candidate.provider] ? candidate : { ...defaults };
   } catch { return { ...defaults }; }
 }
-async function request(path, body) {
-  const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+async function request(path, body, signal) {
+  const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
   let data;
   try { data = await response.json(); } catch { throw new Error('The local backend returned an unreadable response. Check that it is running on port 8000.'); }
-  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `Request failed (${response.status}). Check your connection settings and try again.`);
+  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : Array.isArray(data.detail) ? data.detail.map(item => `${(item.loc || []).join('.')}: ${item.msg}`).join('; ') : `Request failed (${response.status}). Check your connection settings and try again.`);
   return data;
 }
 function App() {
+  const [view, setView] = useState('project');
   const [settings, setSettings] = useState(loadSettings);
   const [code, setCode] = useState(example);
   const [question, setQuestion] = useState('Why does this crash, and how can I include students scoring exactly 60?');
@@ -29,25 +33,45 @@ function App() {
   const [tab, setTab] = useState('report');
   const [health, setHealth] = useState('Checking backend');
   const [copied, setCopied] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [catalog, setCatalog] = useState({ models: [], status: 'idle', error: '' });
+  const [reloadModels, setReloadModels] = useState(0);
+  const cancelModels = useRef(() => {});
   const dialog = useRef(null);
   const lines = useRef(null);
   const lock = useRef(false);
   useEffect(() => {
     fetch('/health').then(r => r.ok ? r.json() : Promise.reject()).then(d => setHealth(d.status === 'ok' ? 'Backend connected' : 'Backend unavailable')).catch(() => setHealth('Backend unavailable'));
   }, []);
-  function update(key, value) { setSettings(s => ({ ...s, [key]: value })); }
+  useEffect(() => {
+    if (!settingsOpen || settings.mode !== '9router') return;
+    setCatalog({ models: [], status: 'loading', error: '' });
+    const cancel = scheduleModelLoad(request, settings, setCatalog);
+    cancelModels.current = cancel;
+    return cancel;
+  }, [settingsOpen, settings.mode, settings.router_base_url, settings.router_api_key, reloadModels]);
+  function clearCatalog() {
+    cancelModels.current();
+    setCatalog({ models: [], status: 'loading', error: '' });
+  }
+  function openSettings() { clearCatalog(); setSettingsOpen(true); dialog.current.showModal(); }
+  function closeSettings() { cancelModels.current(); setSettingsOpen(false); dialog.current.close(); }
+  function update(key, value) {
+    if (['mode', 'router_base_url', 'router_api_key'].includes(key)) clearCatalog();
+    setSettings(s => ({ ...s, [key]: value }));
+  }
   function saveSettings(event) {
     event.preventDefault();
     const invalid = validateSettings(settings);
     if (invalid) { setError(invalid); return; }
     try { localStorage.setItem('codebook-preferences', JSON.stringify(preferences(settings))); } catch { /* Preferences are optional when browser storage is unavailable. */ }
-    setError(''); dialog.current.close();
+    setError(''); closeSettings();
   }
   async function run(event) {
     event.preventDefault();
     if (lock.current || !code.trim()) return;
     const invalid = validateSettings(settings);
-    if (invalid) { setError(invalid); dialog.current.showModal(); return; }
+    if (invalid) { setError(invalid); openSettings(); return; }
     lock.current = true; setBusy('run'); setError(''); setResult(null); setMessages([]); setMessage(''); setTab('report'); setCopied(false);
     try {
       const data = await request('/agent/run', { code, question, settings });
@@ -60,7 +84,7 @@ function App() {
     event.preventDefault();
     if (lock.current || !message.trim() || !result) return;
     const invalid = validateSettings(settings);
-    if (invalid) { setError(invalid); dialog.current.showModal(); return; }
+    if (invalid) { setError(invalid); openSettings(); return; }
     const text = message.trim(); lock.current = true; setBusy('chat'); setError('');
     try {
       const data = await request('/agent/chat', { session_id: result.session_id, message: text, settings });
@@ -74,7 +98,10 @@ function App() {
   }
   const model = settings.mode === '9router' ? settings.router_model : settings.model;
   return <>
-    <header className="masthead"><a className="brand" href="#main"><span className="brand-mark">c<span>:</span></span>codebook<span className="brand-label">STUDENT WORKBENCH</span></a><div className="header-actions"><span className={`health ${health === 'Backend connected' ? 'online' : ''}`}><i />{health}</span><button className="settings-button" onClick={() => { setError(''); dialog.current.showModal(); }}>⚙ <span>Connection settings</span></button></div></header>
+    <ProjectChat hidden={view !== 'project'} settings={settings} request={request} openSettings={() => { setError(''); openSettings(); }} health={health} route={`${settings.mode === '9router' ? '9router' : providers[settings.provider].label} / ${model || 'Choose a model'}`} onReview={() => setView('review')} />
+    <div hidden={view !== 'review'}>
+    <button className="return-project" onClick={() => setView('project')}>← Project Chat</button>
+    <header className="masthead"><a className="brand" href="#main"><span className="brand-mark">c<span>:</span></span>codebook<span className="brand-label">STUDENT WORKBENCH</span></a><div className="header-actions"><span className={`health ${health === 'Backend connected' ? 'online' : ''}`}><i />{health}</span><button className="settings-button" onClick={() => { setError(''); openSettings(); }}>⚙ <span>Connection settings</span></button></div></header>
     <main id="main">
       <section className="intro"><div><p className="eyebrow">A LITTLE GUIDANCE. A LOT OF LEARNING.</p><h1>Understand the <em>why.</em><br />Then fix the code.</h1><p className="intro-copy">Your Python study partner. Find the bug, follow the reasoning,<br className="desktop-break" /> and leave with a better understanding—not just an answer.</p></div><aside className="lesson-note"><span className="note-number">01 / THE PROCESS</span><p>Write. Investigate.<br /><em>Learn something new.</em></p><span>Real tools. Clear explanations. Your code.</span></aside></section>
       <div className="workspace-label"><span>YOUR WORKBENCH</span><span className="route-badge">{settings.mode === '9router' ? '9router' : providers[settings.provider].label} <span> / {model || 'Choose a model'}</span></span></div>
@@ -90,7 +117,8 @@ function App() {
       <section className="chat-panel" aria-labelledby="chat-title"><div className="chat-heading"><span className="step">03</span><div><h2 id="chat-title">Keep asking questions.</h2><p>{result ? 'Continue with the context of this analysis.' : 'Your follow-up conversation starts after the first analysis.'}</p></div><span className="chat-decoration" aria-hidden="true">↳</span></div>{messages.length > 0 && <div className="messages" role="log" aria-label="Follow-up conversation">{messages.map((m, i) => <article className={`message ${m.role === 'You' ? 'user' : ''}`} key={i}><strong>{m.role}</strong><p>{m.text}</p></article>)}</div>}<form className="chat-form" onSubmit={chat}><label className="sr-only" htmlFor="followup">Follow-up question</label><input id="followup" value={message} onChange={e => setMessage(e.target.value)} disabled={!result || !!busy} placeholder="Why does an empty list cause this error?" /><button className="primary" disabled={!result || !!busy || !message.trim()}>{busy === 'chat' ? 'Thinking…' : 'Ask a follow-up'} <span aria-hidden="true">↑</span></button></form><p className="chat-footnote">New analysis, fresh conversation. Your questions stay tied to the current report.</p></section>
       <footer><span><strong>Learn, don’t just copy.</strong> AI can make mistakes. Verify its suggestions.</span><span>Runtime execution is unavailable in this local build.<br />Code is analyzed, never executed on your host.</span></footer>
     </main>
-    <dialog ref={dialog} className="settings-dialog" aria-labelledby="settings-title"><form onSubmit={saveSettings}><div className="dialog-heading"><div><span className="eyebrow">YOUR CONNECTION</span><h2 id="settings-title">Choose your study partner.</h2></div><button type="button" aria-label="Close settings" className="close" onClick={() => dialog.current.close()}>×</button></div><p className="privacy-note">API keys stay in memory only—never in browser storage or URLs. They are sent only to the local backend and your chosen service. Reloading clears them.</p><fieldset disabled={!!busy}><legend>Connection mode</legend><div className="mode-switch">{['direct', '9router'].map(mode => <label key={mode} className={settings.mode === mode ? 'active' : ''}><input type="radio" name="mode" value={mode} checked={settings.mode === mode} onChange={() => update('mode', mode)} />{mode === 'direct' ? 'Direct provider' : '9router gateway'}</label>)}</div>{settings.mode === 'direct' ? <div className="setting-fields"><label>Provider<select value={settings.provider} onChange={e => setSettings(s => ({ ...s, provider: e.target.value, base_url: providers[e.target.value].base_url, model: providers[e.target.value].model, api_key: '' }))}>{Object.entries(providers).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}</select></label><label>API base URL<input type="url" required value={settings.base_url} onChange={e => update('base_url', e.target.value)} placeholder="https://api.example.com/v1" autoComplete="off" /></label><label>Model<input required value={settings.model} onChange={e => update('model', e.target.value)} placeholder="Provider model ID" /></label><label>Provider API key<input type="password" value={settings.api_key} onChange={e => update('api_key', e.target.value)} autoComplete="off" spellCheck="false" placeholder="Your key — cleared on reload" /></label></div> : <div className="setting-fields"><p className="router-note">Separate gateway settings. Use the exact model identifier your 9router supports, including its provider prefix.</p><label>9router base URL<input type="url" required value={settings.router_base_url} onChange={e => update('router_base_url', e.target.value)} autoComplete="off" /></label><label>9router model<input required value={settings.router_model} onChange={e => update('router_model', e.target.value)} placeholder="e.g. openai/gpt-4o-mini" /></label><label>9router API key<input type="password" value={settings.router_api_key} onChange={e => update('router_api_key', e.target.value)} autoComplete="off" spellCheck="false" placeholder="If your gateway requires a key" /></label></div>}</fieldset>{error && <p className="error" role="alert">{error}</p>}<div className="dialog-footer"><span>Only non-secret preferences are saved.</span><button className="primary" disabled={!!busy}>Use connection ↗</button></div></form></dialog>
+    </div>
+    <dialog ref={dialog} onClose={() => { cancelModels.current(); setSettingsOpen(false); }} onCancel={closeSettings} className="settings-dialog" aria-labelledby="settings-title"><form onSubmit={saveSettings}><div className="dialog-heading"><div><span className="eyebrow">YOUR CONNECTION</span><h2 id="settings-title">Choose your study partner.</h2></div><button type="button" aria-label="Close settings" className="close" onClick={closeSettings}>×</button></div><p className="privacy-note">API keys stay in memory only—never in browser storage or URLs. They are sent only to the local backend and your chosen service. Reloading clears them.</p><fieldset disabled={!!busy}><legend>Connection mode</legend><div className="mode-switch">{['direct', '9router'].map(mode => <label key={mode} className={settings.mode === mode ? 'active' : ''}><input type="radio" name="mode" value={mode} checked={settings.mode === mode} onChange={() => update('mode', mode)} />{mode === 'direct' ? 'Direct provider' : '9router gateway'}</label>)}</div>{settings.mode === 'direct' ? <div className="setting-fields"><label>Provider<select value={settings.provider} onChange={e => setSettings(s => ({ ...s, provider: e.target.value, base_url: providers[e.target.value].base_url, model: providers[e.target.value].model, api_key: '' }))}>{Object.entries(providers).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}</select></label><label>API base URL<input type="url" required value={settings.base_url} onChange={e => update('base_url', e.target.value)} placeholder="https://api.example.com/v1" autoComplete="off" /></label><label>Model<input required value={settings.model} onChange={e => update('model', e.target.value)} placeholder="Provider model ID" /></label><label>Provider API key<input type="password" value={settings.api_key} onChange={e => update('api_key', e.target.value)} autoComplete="off" spellCheck="false" placeholder="Your key — cleared on reload" /></label></div> : <div className="setting-fields"><p className="router-note">Models load automatically from your gateway. Choose its exact model identifier, including the provider prefix.</p><label>9router base URL<input type="url" required value={settings.router_base_url} onChange={e => update('router_base_url', e.target.value)} autoComplete="off" /></label><label>9router model<select required value={settings.router_model} onChange={e => update('router_model', e.target.value)} aria-describedby="model-status" aria-busy={catalog.status === 'loading'}><option value="">Select a model</option>{settings.router_model && !catalog.models.includes(settings.router_model) && <option value={settings.router_model} disabled>{settings.router_model} (unavailable)</option>}{catalog.models.map(id => <option key={id} value={id}>{id}</option>)}</select></label><p id="model-status" role="status" className="router-note">{catalog.status === 'loading' ? 'Loading models...' : catalog.status === 'error' ? catalog.error : catalog.models.length ? 'Model catalog loaded. Your selection is not changed automatically.' : 'No models returned. Check your gateway configuration and reload.'}{settings.router_model && !catalog.models.includes(settings.router_model) && ' Your saved model is retained; select another model only if you want to change it.'}</p><button type="button" className="secondary" onClick={() => { clearCatalog(); setReloadModels(n => n + 1); }}>Reload models</button><label>9router API key<input type="password" value={settings.router_api_key} onChange={e => update('router_api_key', e.target.value)} autoComplete="off" spellCheck="false" placeholder="If your gateway requires a key" /></label></div>}</fieldset>{error && <p className="error" role="alert">{error}</p>}<div className="dialog-footer"><span>Only non-secret preferences are saved.</span><button className="primary" disabled={!!busy}>Use connection ↗</button></div></form></dialog>
   </>;
 }
 
