@@ -29,3 +29,13 @@ Snapshots are frozen after the first successful send, keeping each conversation'
 The local filter rejects unsafe paths, environment/secret/credential/key files, private/generated folders, lockfiles, binaries, unknown extensions and files larger than 30,000 bytes before reading. UTF-8 text is accepted only within 30,000 characters per file, 200,000 total characters and 80 files. Conservative byte checks may exclude some multibyte text below the character limit. Over-budget files are skipped whole, never silently truncated, with reasons shown for review. These checks do not replace backend validation or human review for secrets embedded in otherwise ordinary source files. Assistant Markdown supports headings, lists and fenced code as escaped React text, never raw HTML.
 
 `npm test` includes snapshot filtering/budget and conversation-payload regressions alongside the existing settings/catalog checks. No external inference is required for these tests.
+
+### Snapshot coding toolkit
+
+Project Chat displays actual returned `list_files`, `read_file`, `search_files`, `inspect_project`, and `propose_changes` activity per assistant reply, including status, detail and duration. Expand Tool activity to inspect completed calls; no events are simulated. Replies without metadata remain supported. Trace/proposal metadata stays beside the assistant message in browser memory across exchanges, but outgoing history includes only `role` and `content`.
+
+Change proposals show their summary, affected paths/operations and expandable unified diff. Copy patch and Download .patch export the exact diff as plain text with a sanitized download filename. They do not apply changes to disk or the snapshot. Review patches before applying them yourself, then start a new chat with a fresh snapshot. Clipboard errors offer download/manual-copy alternatives.
+
+Framework assistance uses plain-text files and manifests, not installed framework tooling. Supported examples include React/Vue/Svelte/Astro, Python, .NET (`csproj`, `fsproj`, `sln`, `props`, `targets`), Java/Kotlin/Gradle, Flutter/Dart, Ruby (`Gemfile`, `Rakefile`), PHP, Go, Rust, Elixir/Erlang, Dockerfiles and requirements files. Existing secret, generated-directory, binary, lockfile and budget exclusions remain in force. Terminal execution, package installation, browser automation and deployment are unavailable. No remote resources are fetched by the toolkit UI.
+
+Regression tests also cover patch filename sanitation, multiline fidelity, metadata-free request history, legacy replies and framework manifest filtering.

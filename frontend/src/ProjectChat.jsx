@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MAX_MESSAGES, projectPayload, readProject } from './project.js';
+import { MAX_MESSAGES, assistantMessage, projectPayload, proposalDownload, readProject } from './project.js';
 import { validateSettings } from './state.js';
 
 function Markdown({ text }) {
@@ -14,6 +14,36 @@ function Markdown({ text }) {
       return line ? <p key={`${i}-${j}`}>{line}</p> : <br key={`${i}-${j}`} />;
     });
   })}</div>;
+}
+function Proposal({ proposal }) {
+  const [feedback, setFeedback] = useState('');
+  async function copy() {
+    try { await navigator.clipboard.writeText(proposal.diff); setFeedback('Patch copied. No files changed.'); }
+    catch { setFeedback('Clipboard unavailable. Download the patch or select the diff to copy.'); }
+  }
+  function download() {
+    try {
+      const { filename, blob } = proposalDownload(proposal);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url; link.download = filename;
+      document.body.append(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setFeedback('Patch downloaded. Review before applying it yourself.');
+    } catch { setFeedback('Download unavailable. Select the diff to copy.'); }
+  }
+  return <section className="change-proposal" aria-label="Proposed changes">
+    <div className="proposal-heading"><strong>Change proposal</strong><span>Not applied</span></div>
+    <p>{proposal.summary}</p>
+    <ul className="proposal-paths">{proposal.changes.map((change, i) => <li key={i}><span>{change.operation}</span><code>{change.path}</code></li>)}</ul>
+    <details className="proposal-diff"><summary>Review unified diff</summary><pre><code>{proposal.diff}</code></pre></details>
+    <div className="proposal-actions"><button type="button" className="secondary" onClick={copy}>Copy patch</button><button type="button" className="secondary" onClick={download}>Download .patch</button></div>
+    <small>Proposal only. Your folder and snapshot are unchanged.</small>
+    {feedback && <p className="proposal-feedback" role="status">{feedback}</p>}
+  </section>;
+}
+function AssistantTools({ message }) {
+  return <>{message.trace?.length > 0 && <details className="tool-activity"><summary>Tool activity <span>{message.trace.length} completed calls</span></summary><ol>{message.trace.map((step, i) => <li key={i}><div><code>{step.tool}</code><span className={`tool-status ${step.status}`}>{step.status}</span><small>{step.duration_ms} ms</small></div><p>{step.detail}</p></li>)}</ol></details>}{message.proposals?.map((proposal, i) => <Proposal key={`${proposal.id}-${i}`} proposal={proposal} />)}</>;
 }
 const newChat = () => ({ id: crypto.randomUUID(), name: 'New conversation', files: [], skipped: [], messages: [], draft: '', error: '', pending: false });
 export default function ProjectChat({ settings, request, openSettings, health, route, onReview, hidden }) {
@@ -49,8 +79,8 @@ export default function ProjectChat({ settings, request, openSettings, health, r
     const timeout = setTimeout(() => controller.abort(), 120000);
     try {
       const data = await request('/agent/project-chat', payload, controller.signal);
-      if (typeof data.reply !== 'string' || !data.reply.trim()) throw new Error('The backend returned no reply. Your message is kept; try again.');
-      patch(id, { messages: [...payload.messages, { role: 'assistant', content: data.reply }], draft: '', error: '' });
+      const assistant = assistantMessage(data);
+      patch(id, { messages: [...chat.messages, payload.messages.at(-1), assistant], draft: '', error: '' });
     } catch (e) { patch(id, { error: e.name === 'AbortError' ? 'The request timed out. Your draft is kept; try again.' : e.message || 'Could not send. Your draft is kept; try again.' }); }
     finally { clearTimeout(timeout); locks.current.delete(id); patch(id, { pending: false }); }
   }
@@ -71,12 +101,13 @@ export default function ProjectChat({ settings, request, openSettings, health, r
           <div className="context-toolbar"><button className="secondary" disabled={frozen} onClick={() => picker.current.click()}>{reading ? 'Reading locally...' : chat.files.length ? 'Reselect folder' : 'Choose project folder'}</button><span>{selected.length} files selected</span>{chat.files.length > 0 && <button className="text-button" onClick={() => setReview(v => !v)} aria-expanded={review}>{review ? 'Hide file review' : 'Review files'}</button>}</div>
           <input ref={picker} className="sr-only" aria-label="Choose project folder" type="file" webkitdirectory="" multiple onChange={chooseFolder} disabled={frozen} />
           <p>Folder snapshot, not live access. Reselect to refresh before sending; start a new chat to change files afterward.</p>
+          <details className="coding-toolkit"><summary>Coding toolkit <span>Snapshot only · proposals, never edits</span></summary><p><code>list_files</code> · <code>read_file</code> · <code>search_files</code> · <code>inspect_project</code> · <code>propose_changes</code></p><p>Work across frameworks through selected plain-text source and manifests: React, Vue, Svelte, Astro, Python, .NET, Java/Kotlin, Flutter/Dart, Ruby, PHP, Go, Rust, Elixir/Erlang and more. This is code assistance, not framework execution.</p><p>Unavailable: terminal commands, package installation, browser automation and deployment. No live disk access or automatic application of changes.</p></details>
           {review && chat.files.length > 0 && <div className="file-review"><p>Review before sharing. Deselect anything private; filename filtering cannot find every secret inside a file.</p>{chat.files.map(file => <details key={file.path}><summary><label onClick={e => e.stopPropagation()}><input type="checkbox" checked={file.selected} disabled={frozen} onChange={e => patch(chat.id, { files: chat.files.map(f => f.path === file.path ? { ...f, selected: e.target.checked } : f) })} />{file.path}</label><small>{file.content.length.toLocaleString()} chars</small></summary><pre>{file.content}</pre></details>)}</div>}
           {chat.skipped.length > 0 && <details className="skipped-files"><summary>{chat.skipped.length} files skipped entirely (not truncated)</summary><ul>{chat.skipped.map((f, i) => <li key={i}>{f.path}: {f.reason}</li>)}</ul></details>}
         </section>
         <section className="project-transcript" aria-label="Conversation" aria-live="polite">
           {!chat.messages.length && <div className="project-welcome"><span className="welcome-glyph" aria-hidden="true">{'{ }'}</span><h2>Let's look at your project.</h2><p>Choose a folder, review the files, and ask a question.<br />Understand the code. Work through a change. Find the next step.</p><div className="prompt-ideas">{['Explain the project structure', 'What should I improve first?'].map(text => <button key={text} disabled={chat.pending} onClick={() => patch(chat.id, { draft: text })}>{text}</button>)}</div></div>}
-          {chat.messages.map((m, i) => <article className={`project-message ${m.role}`} key={i}><strong>{m.role === 'user' ? 'You' : 'Codebook'}</strong>{m.role === 'assistant' ? <Markdown text={m.content} /> : <p>{m.content}</p>}</article>)}
+          {chat.messages.map((m, i) => <article className={`project-message ${m.role}`} key={i}><strong>{m.role === 'user' ? 'You' : 'Codebook'}</strong>{m.role === 'assistant' ? <><Markdown text={m.content} /><AssistantTools message={m} /></> : <p>{m.content}</p>}</article>)}
           {chat.pending && <div className="pending-message" role="status">Reading your snapshot and thinking...</div>}<div ref={end} />
         </section>
       </div>

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fileExclusion, readProject, projectPayload } from './project.js';
+import { assistantMessage, fileExclusion, readProject, projectPayload, proposalDownload } from './project.js';
 const file = (path, content = 'hello', size = content.length) => ({ webkitRelativePath: path, size, text: async () => content });
 test('rejects private, generated, binary, lock and unsafe paths before reading', async () => {
   const paths = ['p/.env', 'p/.env.local', 'p/secrets.json', 'p/api_key.txt', 'p/credentials.json', 'p/.ssh/config', 'p/node_modules/a.js', 'p/.git/config', 'p/.venv/x.py', 'p/dist/a.js', 'p/build/x.js', 'p/a.png', 'p/package-lock.json', 'p/yarn.lock', '../x.py', '/x.py', 'C:/x.py', 'p\\x.py', 'p/./x.py', 'p//x.py'];
@@ -32,4 +32,38 @@ test('payload contains only selected files and isolated history ending in curren
   assert.throws(() => projectPayload({ ...chat, files: [] }, {}), /at least one/);
   assert.throws(() => projectPayload({ ...chat, draft: ' ' }, {}), /Write/);
   assert.throws(() => projectPayload({ ...chat, draft: 'x'.repeat(10001) }, {}), /10,000/);
+});
+
+test('accepts framework sources and manifests while preserving exclusions', async () => {
+  const paths = ['App.csproj', 'App.fsproj', 'App.sln', 'Directory.Build.props', 'App.targets', 'build.gradle', 'settings.gradle', 'App.kt', 'lib/main.dart', 'mix.exs', 'lib/app.ex', 'app.erl', 'app.hrl', 'Gemfile', 'Rakefile', 'Dockerfile', 'requirements.txt', 'pubspec.yaml', 'page.astro', 'schema.graphql'];
+  const result = await readProject(paths.map(path => file(`demo/${path}`)));
+  assert.equal(result.files.length, paths.length);
+  for (const path of ['Gemfile.lock', 'pubspec.lock', 'mix.lock', 'Cargo.lock', 'app.dll', 'app.jar', 'app.exe']) assert.notEqual(fileExclusion(`demo/${path}`), '');
+});
+
+test('normalizes legacy replies and rejects invalid metadata without fabricating activity', () => {
+  assert.deepEqual(assistantMessage({ reply: 'Legacy answer' }), { role: 'assistant', content: 'Legacy answer', trace: [], proposals: [] });
+  assert.deepEqual(assistantMessage({ reply: 'Answer', trace: [null, { tool: 'read_file', status: 'running' }], proposals: [null, { id: 'bad' }] }).trace, []);
+  assert.deepEqual(assistantMessage({ reply: 'Answer', proposals: [{ id: 'bad' }] }).proposals, []);
+  assert.throws(() => assistantMessage({ reply: ' ' }), /no reply/);
+});
+
+const proposal = { id: '../../unsafe\\name\r\n.patch', summary: 'Update file', diff: '--- a/app.js\n+++ b/app.js\n@@ -1 +1,2 @@\n-old\n+new\n+second\n', changes: [{ path: 'app.js', operation: 'replace', content: 'new\nsecond\n' }] };
+test('patch downloads sanitize names and preserve multiline text exactly', async () => {
+  const download = proposalDownload(proposal);
+  assert.match(download.filename, /^proposal-[a-zA-Z0-9_-]+\.patch$/);
+  assert.equal(download.blob.type, 'text/plain;charset=utf-8');
+  assert.equal(await download.blob.text(), proposal.diff);
+  assert.equal(proposalDownload({ ...proposal, id: '.../\n' }).filename, 'proposal-proposal.patch');
+  assert.ok(proposalDownload({ ...proposal, id: 'x'.repeat(200) }).filename.length <= 95);
+  assert.equal(await proposalDownload({ ...proposal, diff: 'first\r\nsecond\nlast' }).blob.text(), 'first\r\nsecond\nlast');
+});
+test('assistant metadata stays in local history and never enters the next message payload', () => {
+  const trace = [{ tool: 'propose_changes', status: 'success', detail: 'Prepared patch', duration_ms: 2 }];
+  const message = assistantMessage({ reply: 'Proposed only', trace, proposals: [proposal] });
+  const chat = { name: 'demo', files: [{ path: 'app.js', content: 'old', selected: true }], messages: [{ role: 'user', content: 'Change it' }, message], draft: 'Explain it' };
+  const payload = projectPayload(chat, {});
+  assert.deepEqual(payload.messages, [{ role: 'user', content: 'Change it' }, { role: 'assistant', content: 'Proposed only' }, { role: 'user', content: 'Explain it' }]);
+  assert.deepEqual(message.trace, trace);
+  assert.deepEqual(message.proposals, [proposal]);
 });
