@@ -22,6 +22,10 @@ Live scanning permits up to 1,000 eligible files and 10 MB total (30 KB per file
 
 Project chat accepts `workspace_id` instead of uploaded `files`, refreshes disk content on each tool call, and returns `workspace_revision` plus `command_requests`. The AI only requests commands; a human must prepare and approve exact execution separately. One-use approval tokens expire after five minutes; commands have time/output limits and a reduced environment. They run as the OS user, not inside a sandbox, and project scripts may access resources outside the workspace. Root/home/system paths, symlinks, traversal, and recognized sensitive files are blocked by filesystem tools. Keep the API bound to loopback and do not use it with untrusted local users/repositories.
 
+## Long-running Project Chat
+
+`POST /agent/project-chat/live` sends NDJSON heartbeats every 10 seconds while the backend works, followed by a single `result` or sanitized `error` event. The browser has a 45-second *inactivity* timeout rather than a 120-second total limit; no partial model text or tool output is streamed. The older JSON endpoint remains supported. The selected provider's non-streaming chat completion still has a 10-minute read timeout, and its own gateway or upstream may impose additional limits. Heartbeats confirm only that the local backend is working, not that the upstream model is producing tokens.
+
 ## Gateway Response Troubleshooting
 
 Chat requests explicitly set `stream: false` and request JSON. Gateway responses that return SSE, non-JSON content, or an error envelope inside HTTP 200 produce distinct sanitized errors; upstream response bodies and keys are never included. A model appearing in `/v1/models` confirms its route is listed, not that its upstream account, quota, or tool support works. For Flash routes, check the exact catalog ID and the gateway's authenticated upstream connection. An unauthenticated 401 cannot diagnose an authenticated inference failure.

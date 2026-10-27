@@ -8,9 +8,14 @@ import ModelPicker from './ModelPicker.jsx';
 import Markdown from './Markdown.jsx';
 import FilePreview from './FilePreview.jsx';
 import { loadChats, saveChats } from './chatStorage.js';
+import { requestLiveChat } from './liveChat.js';
 
-function Proposal({ proposal, applied, onApply, disabled }) {
+function Proposal({ proposal, applied, onApply, disabled, approval, busy, cancel, confirm }) {
   const [feedback, setFeedback] = useState('');
+  const review = useRef(null);
+  useEffect(() => {
+    if (approval) review.current?.querySelector('.workspace-approval .primary')?.scrollIntoView({ block: 'center' });
+  }, [approval]);
   async function copy() {
     try { await navigator.clipboard.writeText(proposal.diff); setFeedback('Patch copied. No files changed.'); }
     catch { setFeedback('Clipboard unavailable. Download the patch or select the diff to copy.'); }
@@ -26,20 +31,21 @@ function Proposal({ proposal, applied, onApply, disabled }) {
       setFeedback('Patch downloaded. Review before applying it yourself.');
     } catch { setFeedback('Download unavailable. Select the diff to copy.'); }
   }
-  return <section className="change-proposal" aria-label="Proposed changes">
+  return <section ref={review} className="change-proposal" aria-label="Proposed changes">
     <div className="proposal-heading"><strong>Change proposal</strong><span>{applied ? 'Applied with your approval' : 'Not applied'}</span></div>
     <p>{proposal.summary}</p>
     <ul className="proposal-paths">{proposal.changes.map((change, i) => <li key={i}><span>{change.operation}</span><code>{change.path}</code></li>)}</ul>
     <details className="proposal-diff"><summary>Review unified diff</summary><pre><code>{proposal.diff}</code></pre></details>
     <div className="proposal-actions">{onApply && <button type="button" className="primary" disabled={disabled || applied} onClick={onApply}>Review and apply</button>}<button type="button" className="secondary" onClick={copy}>Copy patch</button><button type="button" className="secondary" onClick={download}>Download .patch</button></div>
     <small>{applied ? 'You approved these disk changes. The AI did not apply them independently.' : 'Proposal only. No disk changes until explicit confirmation.'}</small>
+    <WorkspaceApproval approval={approval} busy={busy} cancel={cancel} confirm={confirm} />
     {feedback && <p className="proposal-feedback" role="status">{feedback}</p>}
   </section>;
 }
 function ToolActivity({ trace }) {
   return trace?.length > 0 && <details className="tool-activity"><summary>Tool activity <span>{trace.length} completed calls</span></summary><ol>{trace.map((step, i) => <li key={i}><div><code>{step.tool}</code><span className={`tool-status ${step.status}`}>{step.status}</span><small>{step.duration_ms} ms</small></div><p>{step.detail}</p></li>)}</ol></details>;
 }
-function AssistantTools({ message, local, disabled, reviewChanges, prepare, applied, messageIndex }) {
+function AssistantTools({ message, local, disabled, reviewChanges, prepare, applied, messageIndex, approval, cancelApproval, confirmApproval }) {
   return <><ToolActivity trace={message.trace} />
     {message.subagents?.length > 0 && <section className="worker-results" aria-label="Worker results">
       <h3>Worker results <span>{message.subagents.length} returned</span></h3>
@@ -49,7 +55,7 @@ function AssistantTools({ message, local, disabled, reviewChanges, prepare, appl
         <div className="worker-body">{worker.reply ? <Markdown text={worker.reply} /> : <p>No reply returned.</p>}{worker.error && <p className="worker-error">Error: {worker.error}</p>}<ToolActivity trace={worker.trace} /></div>
       </details>)}
     </section>}
-    {message.proposals?.map((proposal, i) => <Proposal key={`${proposal.id}-${i}`} proposal={proposal} applied={applied?.includes(`${messageIndex}:${i}`)} disabled={disabled || !message.workspace_revision} onApply={local ? () => reviewChanges(proposal, message.workspace_revision, `${messageIndex}:${i}`) : undefined} />)}{local && message.command_requests?.map((command, i) => <section className="change-proposal" key={`command-${i}`}><strong>Command request — not executed</strong><p>{command.summary}</p><pre>{JSON.stringify(command.argv)}</pre><button className="secondary" disabled={disabled} onClick={() => prepare(command.argv)}>Review command</button></section>)}</>;
+    {message.proposals?.map((proposal, i) => <Proposal key={`${proposal.id}-${i}`} proposal={proposal} applied={applied?.includes(`${messageIndex}:${i}`)} disabled={disabled || !message.workspace_revision} approval={approval?.kind === 'files' && approval.key === `${messageIndex}:${i}` ? approval : null} busy={disabled} cancel={cancelApproval} confirm={confirmApproval} onApply={local ? () => reviewChanges(proposal, message.workspace_revision, `${messageIndex}:${i}`) : undefined} />)}{local && message.command_requests?.map((command, i) => <section className="change-proposal" key={`command-${i}`}><strong>Command request — not executed</strong><p>{command.summary}</p><pre>{JSON.stringify(command.argv)}</pre><button className="secondary" disabled={disabled} onClick={() => prepare(command.argv)}>Review command</button></section>)}</>;
 }
 function Attachments({ items, remove, disabled, onPreview }) {
   return items?.length > 0 && <ul className="attachment-list" aria-label="Attachments">{items.map((item, index) => <li key={item.id}><button type="button" className="attachment-preview" aria-label={'Preview ' + item.name} onClick={event => { event.currentTarget.focus(); onPreview(item); }}>{item.kind === 'image' && safeImageUrl(item.data_url) ? <img src={item.data_url} alt="" /> : <span className="attachment-icon" aria-hidden="true">DOC</span>}<span><strong>{item.name}</strong><small>{item.kind === 'image' ? 'Image' : 'Document'} · {Math.ceil(item.size / 1024)} KB</small></span></button>{remove && <button type="button" disabled={disabled} onClick={() => remove(index)} aria-label={'Remove ' + item.name}>×</button>}</li>)}</ul>;
@@ -65,7 +71,7 @@ function ContextInfo({ preview, lastContext, loading, error }) {
   </> : <p>Open a project or attach a file to estimate its next request. No provider key is needed for preview.</p>}{lastContext && preview && <p className="context-source">Last request: ~{Math.ceil(lastContext.estimated_tokens).toLocaleString()} tokens (excludes draft). {lastContext.dropped_messages > 0 && lastContext.dropped_messages + ' older messages omitted; still saved.'}</p>}</>;
 }
 const newChat = () => ({ contextStart: 0, lastContext: null, id: crypto.randomUUID(), name: 'New conversation', files: [], skipped: [], messages: [], draft: '', attachments: [], attachmentErrors: [], preparing: false, error: '', pending: false, approval: null, applied: [], commandResults: [] });
-export default function ProjectChat({ settings, request, openSettings, health, route, onCompiler, hidden, modelCatalog = { models: [], status: 'idle', error: '' }, onModelOpen, onModelReload, onModelSelect, onPendingChange }) {
+export default function ProjectChat({ settings, request, liveRequest = requestLiveChat, openSettings, health, route, onCompiler, hidden, modelCatalog = { models: [], status: 'idle', error: '' }, onModelOpen, onModelReload, onModelSelect, onPendingChange }) {
   const [chats, setChats] = useState(() => [newChat()]);
   const [active, setActive] = useState(null);
   const [storageReady, setStorageReady] = useState(false);
@@ -287,14 +293,12 @@ export default function ProjectChat({ settings, request, openSettings, health, r
     let payload;
     try { payload = projectPayload(chat, settings); } catch (e) { patch(id, { error: e.message }); return; }
     locks.current.add(id); patch(id, { pending: true, error: '', approval: null });
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120000);
     try {
-      const data = await request('/agent/project-chat', payload, controller.signal);
+      const data = await liveRequest('/agent/project-chat/live', payload);
       const assistant = assistantMessage(data);
       patch(id, { messages: [...chat.messages, payload.messages.at(-1), assistant], draft: '', attachments: [], attachmentErrors: [], error: '', lastContext: safeContext(data.context) });
     } catch (e) { patch(id, { error: e.name === 'AbortError' ? 'The request timed out. Your draft is kept; try again.' : (e.message || 'Could not send. Your draft is kept; try again.') + (payload.messages.some(m => m.attachments?.some(a => a.kind === 'image')) ? ' Images require a vision-capable model and provider. Your draft and attachments are kept.' : '') }); }
-    finally { clearTimeout(timeout); locks.current.delete(id); patch(id, { pending: false }); }
+    finally { locks.current.delete(id); patch(id, { pending: false }); }
   }
   async function openFilePreview(path) {
     const generation = ++previewGeneration.current;
@@ -343,13 +347,14 @@ export default function ProjectChat({ settings, request, openSettings, health, r
           <details className="coding-toolkit"><summary>Coding toolkit <span>Proposals first · explicit local approvals</span></summary><p><code>list_files</code> · <code>read_file</code> · <code>search_files</code> · <code>inspect_project</code> · <code>analyze_python</code> · <code>validate_json</code> · <code>check_conflicts</code> · <code>propose_changes</code> · <code>delegate_tasks</code></p><p>Diagnostics are static: Python analysis, JSON validation and conflict-marker checks do not run your code. Delegated workers use separate context through the same configured provider/gateway: at most 3 workers per request, 2 at once, and no nested workers. The orchestrator may choose an optional model override per task; otherwise workers use your current connection model. Workers cannot run shell commands or apply changes. Results appear only after the request completes.</p><p>Work across frameworks through selected plain-text source and manifests: React, Vue, Svelte, Astro, Python, .NET, Java/Kotlin, Flutter/Dart, Ruby, PHP, Go, Rust, Elixir/Erlang and more. This is code assistance, not framework execution.</p><p>Local mode supports explicit file and command approvals. Snapshot mode never writes or executes. No automatic installation, deployment or browser automation.</p></details>
           {review && chat.files.length > 0 && <div className="file-review"><p>Review before sharing. In local mode the entire eligible snapshot is shared; in browser mode deselect anything private; filename filtering cannot find every secret inside a file.</p>{chat.files.map(file => <details key={file.path}><summary><label onClick={e => e.stopPropagation()}><input type="checkbox" checked={file.selected} disabled={frozen} onChange={e => patch(chat.id, { files: chat.files.map(f => f.path === file.path ? { ...f, selected: e.target.checked } : f) })} />{file.path}</label><small>{file.content.length.toLocaleString()} chars</small></summary><pre>{file.content}</pre></details>)}</div>}
           {chat.skipped.length > 0 && <details className="skipped-files"><summary>{chat.skipped.length} files skipped entirely (not truncated)</summary><ul>{chat.skipped.map((f, i) => <li key={i}>{f.path}: {f.reason}</li>)}</ul></details>}
-        </section>{chat.error && <p className="error" role="alert">{chat.error}</p>}<WorkspaceApproval approval={chat.approval} busy={busy} cancel={() => patch(chat.id, { approval: null })} confirm={confirmApproval} /></dialog>
-        <WorkspaceApproval approval={chat.approval} busy={busy} cancel={() => patch(chat.id, { approval: null })} confirm={confirmApproval} />
+        </section></dialog>
+        {chat.error && <p className="error" role="alert">{chat.error}</p>}
+        <WorkspaceApproval approval={chat.approval && (chat.approval.kind === 'command' || !chat.approval.key) ? chat.approval : null} busy={busy} cancel={() => patch(chat.id, { approval: null })} confirm={confirmApproval} />
         {chat.commandResults.map((result, i) => <details className="command-result" key={i}><summary>Approved local command result {i + 1}</summary><pre>{result}</pre><p>Added to your draft for the next prompt; not sent automatically.</p></details>)}
         {contextStart(chat) > 0 && <p className="context-banner" role="status">Earlier messages not sent. Compact conversation keeps recent turns without a summary; all earlier messages remain visible and saved.</p>}
         <section className="project-transcript" aria-label="Conversation" aria-live="polite">
           {!chat.messages.length && <div className="project-welcome"><span className="welcome-glyph" aria-hidden="true">{'{ }'}</span><h2>Let's look at your project.</h2><p>Choose a project folder, then ask a question. Attach supporting files if needed.<br />Understand the code. Work through a change. Find the next step.</p><div className="prompt-ideas">{['Explain the project structure', 'What should I improve first?'].map(text => <button key={text} disabled={chat.pending} onClick={() => patch(chat.id, { draft: text })}>{text}</button>)}</div></div>}
-          {chat.messages.map((m, i) => <article className={`project-message ${m.role}`} key={i}><strong>{m.role === 'user' ? 'You' : 'Codebook'}</strong>{m.role === 'assistant' ? <><Markdown text={m.content} files={selected} onPreview={openFilePreview} /><AssistantTools message={m} messageIndex={i} local={Boolean(chat.workspace_id)} disabled={busy} applied={chat.applied} reviewChanges={reviewChanges} prepare={prepare} /></> : <><Attachments items={m.attachments} onPreview={previewAttachment} /><p>{m.content}</p></>}</article>)}
+          {chat.messages.map((m, i) => <article className={`project-message ${m.role}`} key={i}><strong>{m.role === 'user' ? 'You' : 'Codebook'}</strong>{m.role === 'assistant' ? <><Markdown text={m.content} files={selected} onPreview={openFilePreview} /><AssistantTools message={m} messageIndex={i} local={Boolean(chat.workspace_id)} disabled={busy} applied={chat.applied} reviewChanges={reviewChanges} prepare={prepare} approval={chat.approval} cancelApproval={() => patch(chat.id, { approval: null })} confirmApproval={confirmApproval} /></> : <><Attachments items={m.attachments} onPreview={previewAttachment} /><p>{m.content}</p></>}</article>)}
           {chat.pending && <div className="pending-message" role="status">Reading your snapshot and thinking...</div>}<div ref={end} />
         </section>
       </div>

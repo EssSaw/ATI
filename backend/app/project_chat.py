@@ -1,3 +1,4 @@
+import asyncio
 import json
 import posixpath
 import re
@@ -6,6 +7,7 @@ from pathlib import PurePosixPath
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from .agent.llm_client import call_chat_completion
@@ -966,7 +968,7 @@ async def project_chat(request: ProjectChatRequest) -> ProjectChatResponse:
                 messages=llm_messages,
                 tools=coordinator_tools,
                 temperature=0.2,
-                timeout=60.0,
+                timeout=600.0,
             )
         except HTTPException as http_exc:
             if http_exc.status_code == 400 and has_image_attachments:
@@ -1105,3 +1107,30 @@ async def project_chat(request: ProjectChatRequest) -> ProjectChatResponse:
         command_requests=command_requests,
         context=current_context_info,
     )
+
+
+@router.post("/agent/project-chat/live")
+async def project_chat_live(request: ProjectChatRequest) -> StreamingResponse:
+    """Keep an in-progress chat response alive without exposing partial model output."""
+    async def events():
+        task = asyncio.create_task(project_chat(request))
+        try:
+            while not task.done():
+                yield b'{"type":"heartbeat"}\n'
+                await asyncio.wait({task}, timeout=10)
+            try:
+                result = await task
+                yield (json.dumps({"type": "result", "data": result.model_dump()}, ensure_ascii=False) + "\n").encode("utf-8")
+            except HTTPException as exc:
+                yield (json.dumps({"type": "error", "detail": exc.detail if isinstance(exc.detail, str) else "Chat failed."}) + "\n").encode("utf-8")
+            except Exception:
+                yield b'{"type":"error","detail":"Chat failed unexpectedly. Your draft was kept."}\n'
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    return StreamingResponse(events(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

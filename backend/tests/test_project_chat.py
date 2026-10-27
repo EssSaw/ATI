@@ -550,3 +550,39 @@ def test_stateless_no_session_persistence(client):
 
     # Ensure session_store was NEVER touched or mutated
     assert len(session_store._sessions) == initial_count
+
+
+def test_live_chat_emits_heartbeats_and_final_result(client):
+    async def delayed_reply(**kwargs):
+        import asyncio
+        await asyncio.sleep(0.025)
+        return {"choices": [{"message": {"role": "assistant", "content": "Done"}}]}
+
+    with patch('backend.app.project_chat.call_chat_completion', side_effect=delayed_reply):
+        with client.stream('POST', '/agent/project-chat/live', json={
+            'messages': [{'role': 'user', 'content': 'Create a demo'}],
+            'settings': {'mode': '9router', 'router_model': 'fixture/model'},
+        }) as response:
+            assert response.status_code == 200
+            assert response.headers['content-type'].startswith('application/x-ndjson')
+            events = [json.loads(line) for line in response.iter_lines() if line]
+    assert events[0] == {'type': 'heartbeat'}
+    assert events[-1]['type'] == 'result'
+    assert events[-1]['data']['reply'] == 'Done'
+
+
+def test_live_chat_reports_sanitized_errors_without_silently_ending(client):
+    from fastapi import HTTPException
+
+    async def rejected(**kwargs):
+        raise HTTPException(status_code=504, detail='AI Provider request timed out.')
+
+    with patch('backend.app.project_chat.call_chat_completion', side_effect=rejected):
+        response = client.post('/agent/project-chat/live', json={
+            'messages': [{'role': 'user', 'content': 'Create a demo'}],
+            'settings': {'mode': '9router', 'router_model': 'fixture/model'},
+        })
+    events = [json.loads(line) for line in response.text.splitlines() if line]
+    assert response.status_code == 200
+    assert events[0]['type'] == 'heartbeat'
+    assert events[-1] == {'type': 'error', 'detail': 'AI Provider request timed out.'}
