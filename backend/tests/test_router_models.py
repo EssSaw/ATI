@@ -18,7 +18,7 @@ def test_models_uses_gateway_key_and_preserves_exact_ids(client):
     with patch('backend.app.api.routes.httpx.AsyncClient', return_value=gateway_client(handler)):
         response = client.post('/agent/models', json={'router_base_url': 'http://localhost:20128/v1/', 'router_api_key': 'fixture-router-key'})
     assert response.status_code == 200
-    assert response.json() == {'models': ['cc/model-a', 'cx/model-b']}
+    assert response.json() == {'models': ['cc/model-a', 'cx/model-b'], 'limits': {}}
     assert 'fixture-router-key' not in response.text
 
 
@@ -32,7 +32,7 @@ def test_models_rejects_malformed_gateway_response(client, data):
 def test_empty_model_catalog_is_valid(client):
     with patch('backend.app.api.routes.httpx.AsyncClient', return_value=gateway_client(lambda r: httpx.Response(200, json={'data': []}))):
         response = client.post('/agent/models', json={})
-    assert response.json() == {'models': []}
+    assert response.json() == {'models': [], 'limits': {}}
 
 
 @pytest.mark.parametrize('status,expected', [(401, 401), (403, 403), (429, 429), (500, 502), (302, 502)])
@@ -58,3 +58,20 @@ def test_gateway_rejects_metadata_url_before_request(client):
         response = client.post('/agent/models', json={'router_base_url': 'http://169.254.169.254/v1'})
     upstream.assert_not_called()
     assert response.status_code == 400
+
+
+def test_catalog_exposes_only_valid_model_token_limits(client):
+    data = {'data': [
+        {'id': 'ag/gemini-3.8-flash-high', 'context_length': 1048576, 'max_completion_tokens': 65536, 'api_key': 'private'},
+        {'id': 'cx/gpt-6-sol[1m]', 'context_length': 872000, 'max_completion_tokens': 128000},
+        {'id': 'unknown', 'context_length': '1048576', 'max_completion_tokens': 65536},
+        {'id': 'broken', 'context_length': 10000, 'max_completion_tokens': 20000},
+    ]}
+    with patch('backend.app.api.routes.httpx.AsyncClient', return_value=gateway_client(lambda r: httpx.Response(200, json=data))):
+        response = client.post('/agent/models', json={})
+    assert response.status_code == 200
+    assert response.json()['limits'] == {
+        'ag/gemini-3.8-flash-high': {'context_length': 1048576, 'max_completion_tokens': 65536},
+        'cx/gpt-6-sol[1m]': {'context_length': 872000, 'max_completion_tokens': 128000},
+    }
+    assert 'private' not in response.text

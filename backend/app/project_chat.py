@@ -260,7 +260,7 @@ class ProjectChatRequest(BaseModel):
     settings: Settings = Field(default_factory=Settings)
     workspace_id: Optional[str] = Field(default=None)
     context_window: int = Field(default=DEFAULT_CONTEXT_WINDOW, ge=8192, le=2000000)
-    response_reserved: int = Field(default=DEFAULT_RESPONSE_RESERVED, ge=512, le=32768)
+    response_reserved: int = Field(default=DEFAULT_RESPONSE_RESERVED, ge=512, le=200000)
 
     @model_validator(mode="after")
     def validate_reserved_less_than_window(self) -> "ProjectChatRequest":

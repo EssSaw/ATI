@@ -1,4 +1,4 @@
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -48,6 +48,7 @@ class RouterModelsRequest(BaseModel):
 
 class RouterModelsResponse(BaseModel):
     models: List[str]
+    limits: Dict[str, Dict[str, int]] = Field(default_factory=dict)
 
 
 class AgentRunRequest(BaseModel):

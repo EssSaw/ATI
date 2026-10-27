@@ -90,9 +90,17 @@ async def router_models(request: RouterModelsRequest) -> RouterModelsResponse:
         ):
             raise ValueError()
         models = sorted({item["id"] for item in data})
+        limits = {}
+        for item in data:
+            context = item.get("context_length")
+            output = item.get("max_completion_tokens")
+            if (type(context) is int and 8192 <= context <= 2000000
+                    and type(output) is int and 512 <= output <= 200000
+                    and output < context):
+                limits[item["id"]] = {"context_length": context, "max_completion_tokens": output}
     except (ValueError, KeyError, TypeError):
         raise HTTPException(status_code=502, detail="Gateway returned an invalid model list.")
-    return RouterModelsResponse(models=models)
+    return RouterModelsResponse(models=models, limits=limits)
 
 
 @router.get("/providers", response_model=ProvidersResponse)

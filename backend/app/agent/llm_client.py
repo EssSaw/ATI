@@ -22,11 +22,13 @@ async def call_chat_completion(
     headers = {
         "Authorization": "Bearer " + api_key,
         "Content-Type": "application/json",
+        "Accept": "application/json",
     }
     payload: Dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
+        "stream": False,
     }
     if tools:
         payload["tools"] = tools
@@ -37,8 +39,15 @@ async def call_chat_completion(
         try:
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
+            if "text/event-stream" in response.headers.get("content-type", "").lower():
+                raise HTTPException(status_code=502, detail="AI provider returned a streamed response despite stream=false. Check the gateway's OpenAI-compatible JSON route.")
             try:
                 data = response.json()
+            except ValueError:
+                raise HTTPException(status_code=502, detail="AI provider returned a non-JSON response. Check the gateway URL and selected model route.")
+            if isinstance(data, dict) and "error" in data:
+                raise HTTPException(status_code=502, detail="AI provider reported an error inside an HTTP 200 response. Check the selected model's upstream connection and quota in the gateway.")
+            try:
                 message = data["choices"][0]["message"]
                 if not isinstance(message, dict):
                     raise ValueError()

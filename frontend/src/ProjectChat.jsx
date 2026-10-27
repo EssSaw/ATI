@@ -5,21 +5,10 @@ import { validateSettings } from './state.js';
 import { ATTACHMENT_ACCEPT, MAX_ATTACHMENTS, attachmentType, preparedAttachment, readAttachment, safeImageUrl } from './attachments.js';
 import { CONTEXT_PARTS, compactBoundary, contextStart, estimateContext, safeContext } from './context.js';
 import ModelPicker from './ModelPicker.jsx';
+import Markdown from './Markdown.jsx';
+import FilePreview from './FilePreview.jsx';
 import { loadChats, saveChats } from './chatStorage.js';
 
-function Markdown({ text }) {
-  const blocks = text.split(/(```[^\n]*\n[\s\S]*?(?:```|$))/g);
-  return <div className="safe-markdown">{blocks.map((block, i) => {
-    if (block.startsWith('```')) { const newline = block.indexOf('\n'); return <pre key={i}><code>{block.slice(newline + 1).replace(/```$/, '')}</code></pre>; }
-    return block.split('\n').map((line, j) => {
-      const heading = /^(#{1,6})\s+(.+)/.exec(line);
-      if (heading) return React.createElement(`h${Math.min(heading[1].length + 1, 6)}`, { key: `${i}-${j}` }, heading[2]);
-      const list = /^\s*(?:[-*]|\d+\.)\s+(.+)/.exec(line);
-      if (list) return <ul key={`${i}-${j}`}><li>{list[1]}</li></ul>;
-      return line ? <p key={`${i}-${j}`}>{line}</p> : <br key={`${i}-${j}`} />;
-    });
-  })}</div>;
-}
 function Proposal({ proposal, applied, onApply, disabled }) {
   const [feedback, setFeedback] = useState('');
   async function copy() {
@@ -62,8 +51,8 @@ function AssistantTools({ message, local, disabled, reviewChanges, prepare, appl
     </section>}
     {message.proposals?.map((proposal, i) => <Proposal key={`${proposal.id}-${i}`} proposal={proposal} applied={applied?.includes(`${messageIndex}:${i}`)} disabled={disabled || !message.workspace_revision} onApply={local ? () => reviewChanges(proposal, message.workspace_revision, `${messageIndex}:${i}`) : undefined} />)}{local && message.command_requests?.map((command, i) => <section className="change-proposal" key={`command-${i}`}><strong>Command request — not executed</strong><p>{command.summary}</p><pre>{JSON.stringify(command.argv)}</pre><button className="secondary" disabled={disabled} onClick={() => prepare(command.argv)}>Review command</button></section>)}</>;
 }
-function Attachments({ items, remove, disabled }) {
-  return items?.length > 0 && <ul className="attachment-list" aria-label="Attachments">{items.map((item, index) => <li key={item.id}>{item.kind === 'image' && safeImageUrl(item.data_url) ? <a href={item.data_url} target="_blank" rel="noreferrer" aria-label={'Preview ' + item.name}><img src={item.data_url} alt={item.name} /></a> : <span className="attachment-icon" aria-hidden="true">DOC</span>}<span><strong>{item.name}</strong><small>{item.kind === 'image' ? 'Image' : 'Document'} · {Math.ceil(item.size / 1024)} KB</small></span>{remove && <button type="button" disabled={disabled} onClick={() => remove(index)} aria-label={'Remove ' + item.name}>×</button>}</li>)}</ul>;
+function Attachments({ items, remove, disabled, onPreview }) {
+  return items?.length > 0 && <ul className="attachment-list" aria-label="Attachments">{items.map((item, index) => <li key={item.id}><button type="button" className="attachment-preview" aria-label={'Preview ' + item.name} onClick={event => { event.currentTarget.focus(); onPreview(item); }}>{item.kind === 'image' && safeImageUrl(item.data_url) ? <img src={item.data_url} alt="" /> : <span className="attachment-icon" aria-hidden="true">DOC</span>}<span><strong>{item.name}</strong><small>{item.kind === 'image' ? 'Image' : 'Document'} · {Math.ceil(item.size / 1024)} KB</small></span></button>{remove && <button type="button" disabled={disabled} onClick={() => remove(index)} aria-label={'Remove ' + item.name}>×</button>}</li>)}</ul>;
 }
 function ContextInfo({ preview, lastContext, loading, error }) {
   const context = preview?.context || lastContext;
@@ -86,6 +75,9 @@ export default function ProjectChat({ settings, request, openSettings, health, r
   const [menuPosition, setMenuPosition] = useState({});
   const [attachMenu, setAttachMenu] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
+  const [filePreview, setFilePreview] = useState(null);
+  const previewGeneration = useRef(0);
+  const workspaceTokens = useRef(new Map());
   const [preview, setPreview] = useState(null);
   const [previewError, setPreviewError] = useState('');
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -105,6 +97,7 @@ export default function ProjectChat({ settings, request, openSettings, health, r
   const chat = chats.find(c => c.id === active) || chats[0];
   useEffect(() => { onPendingChange?.(chats.some(item => item.pending)); }, [chats, onPendingChange]);
   useEffect(() => { dragDepth.current = 0; setDragging(false); }, [chat.id, hidden]);
+  useEffect(() => { previewGeneration.current++; setFilePreview(null); }, [chat.id, hidden]);
   const patch = (id, changes) => setChats(all => all.map(c => c.id === id ? { ...c, ...changes } : c));
   useEffect(() => {
     let mounted = true;
@@ -251,7 +244,7 @@ export default function ProjectChat({ settings, request, openSettings, health, r
     finally { locks.current.delete(id); patch(id, { pending: false }); }
   }
   function connect(path) {
-    localAction(async id => { const data = await request('/agent/workspaces/open', { path }); patch(id, { ...workspaceSnapshot(data), needsReconnect: false, approval: null, applied: [] }); setReview(true); });
+    localAction(async id => { const data = await request('/agent/workspaces/open', { path }); workspaceTokens.current.set(id, typeof data.token === 'string' ? data.token : data.workspace_id); patch(id, { ...workspaceSnapshot(data), needsReconnect: false, approval: null, applied: [] }); setReview(true); });
   }
   function refresh() {
     localAction(async id => { const data = await request('/agent/workspaces/snapshot', { workspace_id: chat.workspace_id }); patch(id, { ...workspaceSnapshot(data), approval: null }); });
@@ -303,6 +296,26 @@ export default function ProjectChat({ settings, request, openSettings, health, r
     } catch (e) { patch(id, { error: e.name === 'AbortError' ? 'The request timed out. Your draft is kept; try again.' : (e.message || 'Could not send. Your draft is kept; try again.') + (payload.messages.some(m => m.attachments?.some(a => a.kind === 'image')) ? ' Images require a vision-capable model and provider. Your draft and attachments are kept.' : '') }); }
     finally { clearTimeout(timeout); locks.current.delete(id); patch(id, { pending: false }); }
   }
+  async function openFilePreview(path) {
+    const generation = ++previewGeneration.current;
+    const local = Boolean(chat.workspace_id || chat.needsReconnect);
+    setFilePreview({ local, loading: local, item: null, error: '' });
+    try {
+      let files = chat.files.filter(file => file.selected);
+      if (local) {
+        const token = workspaceTokens.current.get(chat.id);
+        if (chat.needsReconnect || !chat.workspace_id || !token) throw new Error('Reconnect this local project to preview its allowed files. No disk access was attempted.');
+        const data = await request('/agent/workspaces/snapshot', { workspace_id: chat.workspace_id });
+        const snapshot = workspaceSnapshot(data);
+        files = snapshot.files;
+      }
+      if (generation !== previewGeneration.current) return;
+      const item = path ? files.find(file => file.path === path) : null;
+      setFilePreview({ local, files, item, loading: false, error: path && !item ? 'This path is not in the allowed snapshot. No arbitrary file was read.' : '' });
+    } catch (error) { if (generation === previewGeneration.current) setFilePreview({ local, files: [], item: null, loading: false, error: error.message || 'Preview unavailable. Reconnect and try again.' }); }
+  }
+  function previewAttachment(item) { previewGeneration.current++; setFilePreview({ item, local: false, files: [] }); }
+  function closeFilePreview() { previewGeneration.current++; setFilePreview(null); }
   const busy = chat.pending || chat.preparing || reading || !storageReady;
   const frozen = busy || Boolean(chat.workspace_id) || chat.messages.length > 0;
   const selected = chat.files.filter(f => f.selected);
@@ -318,9 +331,9 @@ export default function ProjectChat({ settings, request, openSettings, health, r
       </div>)}</nav>
       <div className="sidebar-bottom"><button onClick={onCompiler}>Online compiler <span aria-hidden="true">↗</span></button><button onClick={openSettings}>Connection settings</button><small role="status">{!storageReady ? 'Loading saved chats…' : storageError || (saving ? 'Saving locally…' : 'Chats saved on this browser. API keys are not saved.')}</small></div>
     </aside>
-    <main className="project-main" id="project-main" onDragEnter={dragEnter} onDragLeave={dragLeave} onDragOver={event => { if (fileDrag(event)) { event.preventDefault(); event.dataTransfer.dropEffect = busy ? 'none' : 'copy'; } }} onDrop={dropFiles}>
+    <main className={"project-main" + (filePreview ? " with-preview" : "")} id="project-main" onDragEnter={dragEnter} onDragLeave={dragLeave} onDragOver={event => { if (fileDrag(event)) { event.preventDefault(); event.dataTransfer.dropEffect = busy ? 'none' : 'copy'; } }} onDrop={dropFiles}>
       {dragging && <div className="file-drop-overlay" role="status">{busy ? 'Busy: wait before dropping files' : 'Drop documents or images to attach (up to 6)'}</div>}
-      <header className="project-header"><div><span className="sidebar-label">PROJECT CHAT</span><h1>{chat.name}</h1><button className="project-status" onClick={() => projectSettings(chat.id)}>{chat.needsReconnect ? 'Local project · reconnect required' : chat.workspace_id ? 'Local project connected' : selected.length ? selected.length + ' snapshot files' : 'No project selected'} <span aria-hidden="true">↗</span></button>{(!projectReady(chat) || chat.needsReconnect) && <aside className="project-tutorial" role="note"><p>{chat.needsReconnect ? 'Reconnect your local project before asking about its code.' : 'Select a project folder before asking about its code'}</p><small>Attachments are not a project directory.</small><button type="button" onClick={() => projectSettings(chat.id)}>{chat.needsReconnect ? 'Reconnect project' : 'Select project'}</button></aside>}</div><div><span className="project-route">{route}</span><small>{health}</small></div></header>
+      <header className="project-header"><div><span className="sidebar-label">PROJECT CHAT</span><h1>{chat.name}</h1><button className="project-status" onClick={() => projectSettings(chat.id)}>{chat.needsReconnect ? 'Local project · reconnect required' : chat.workspace_id ? 'Local project connected' : selected.length ? selected.length + ' snapshot files' : 'No project selected'} <span aria-hidden="true">↗</span></button>{(!projectReady(chat) || chat.needsReconnect) && <aside className="project-tutorial" role="note"><p>{chat.needsReconnect ? 'Reconnect your local project before asking about its code.' : 'Select a project folder before asking about its code'}</p><small>Attachments are not a project directory.</small><button type="button" onClick={() => projectSettings(chat.id)}>{chat.needsReconnect ? 'Reconnect project' : 'Select project'}</button></aside>}</div><div><button type="button" className="preview-files-toggle" onClick={event => { event.currentTarget.focus(); openFilePreview(); }} aria-expanded={Boolean(filePreview)}>Preview files</button><span className="project-route">{route}</span><small>{health}</small></div></header>
       <div className="project-scroll">
         <dialog ref={settingsDialog} className="project-settings-dialog" aria-labelledby="project-settings-title" onClick={event => { if (event.target === settingsDialog.current) settingsDialog.current.close(); }}><header><div><span className="sidebar-label">CONVERSATION WORKSPACE</span><h2 id="project-settings-title">Project settings</h2><p>{chat.name}</p></div><button className="settings-close" type="button" aria-label="Close project settings" onClick={() => settingsDialog.current.close()}>×</button></header>
         <section className="project-context" aria-label="Project snapshot">
@@ -336,7 +349,7 @@ export default function ProjectChat({ settings, request, openSettings, health, r
         {contextStart(chat) > 0 && <p className="context-banner" role="status">Earlier messages not sent. Compact conversation keeps recent turns without a summary; all earlier messages remain visible and saved.</p>}
         <section className="project-transcript" aria-label="Conversation" aria-live="polite">
           {!chat.messages.length && <div className="project-welcome"><span className="welcome-glyph" aria-hidden="true">{'{ }'}</span><h2>Let's look at your project.</h2><p>Choose a project folder, then ask a question. Attach supporting files if needed.<br />Understand the code. Work through a change. Find the next step.</p><div className="prompt-ideas">{['Explain the project structure', 'What should I improve first?'].map(text => <button key={text} disabled={chat.pending} onClick={() => patch(chat.id, { draft: text })}>{text}</button>)}</div></div>}
-          {chat.messages.map((m, i) => <article className={`project-message ${m.role}`} key={i}><strong>{m.role === 'user' ? 'You' : 'Codebook'}</strong>{m.role === 'assistant' ? <><Markdown text={m.content} /><AssistantTools message={m} messageIndex={i} local={Boolean(chat.workspace_id)} disabled={busy} applied={chat.applied} reviewChanges={reviewChanges} prepare={prepare} /></> : <><Attachments items={m.attachments} /><p>{m.content}</p></>}</article>)}
+          {chat.messages.map((m, i) => <article className={`project-message ${m.role}`} key={i}><strong>{m.role === 'user' ? 'You' : 'Codebook'}</strong>{m.role === 'assistant' ? <><Markdown text={m.content} files={selected} onPreview={openFilePreview} /><AssistantTools message={m} messageIndex={i} local={Boolean(chat.workspace_id)} disabled={busy} applied={chat.applied} reviewChanges={reviewChanges} prepare={prepare} /></> : <><Attachments items={m.attachments} onPreview={previewAttachment} /><p>{m.content}</p></>}</article>)}
           {chat.pending && <div className="pending-message" role="status">Reading your snapshot and thinking...</div>}<div ref={end} />
         </section>
       </div>
@@ -346,9 +359,10 @@ export default function ProjectChat({ settings, request, openSettings, health, r
         <input ref={attachmentPicker} className="sr-only" type="file" multiple accept={ATTACHMENT_ACCEPT} aria-label="Attach files" disabled={busy} onChange={event => { const files = Array.from(event.target.files || []); event.target.value = ''; attachFiles(files); }} />
         {chat.attachmentErrors?.map((error, index) => <p className="attachment-error" role="alert" key={index}>{error}</p>)}
         {chat.preparing && <p role="status">Preparing attachments locally…</p>}
-        <form className="project-composer" onSubmit={send}><Attachments items={chat.attachments} disabled={busy} remove={index => patch(chat.id, { attachments: chat.attachments.filter((_, i) => i !== index) })} /><label className="sr-only" htmlFor="project-prompt">Message about your project</label><textarea id="project-prompt" placeholder="Ask about your project..." value={chat.draft} disabled={busy} maxLength={10000} onChange={e => patch(chat.id, { draft: e.target.value })} onKeyDown={e => handleComposerKeydown(e, { busy })} /><div className="composer-actions"><div className="attach-control"><button type="button" className="attach-toggle" aria-label="Add attachment or browser snapshot" aria-expanded={attachMenu} aria-haspopup="menu" disabled={busy} onClick={() => setAttachMenu(!attachMenu)}>+</button>{attachMenu && <div className="attach-menu" role="menu" onKeyDown={event => menuKeydown(event, () => { setAttachMenu(false); document.querySelector('.attach-toggle')?.focus(); })}><button type="button" role="menuitem" disabled={busy || chat.attachments?.length >= MAX_ATTACHMENTS} onClick={() => { setAttachMenu(false); attachmentPicker.current.click(); }}>Attach files</button><button type="button" role="menuitem" disabled={frozen} aria-describedby="snapshot-reason" onClick={() => { setAttachMenu(false); picker.current.click(); }}>Choose browser snapshot</button><small id="snapshot-reason">{chat.messages.length ? 'Snapshot is frozen after the first message. Start a new chat to switch.' : chat.workspace_id ? 'A local workspace is connected. Start a new chat for a browser snapshot.' : 'Select a folder to review its source files.'}</small></div>}</div><div className="composer-right"><ModelPicker settings={settings} catalog={modelCatalog} onOpen={onModelOpen} onReload={onModelReload} onSelect={onModelSelect} disabled={chats.some(item => item.pending) || !storageReady} /><div className="context-control"><button ref={contextButton} type="button" className="context-toggle" aria-label="Session info and context window" title="Session info and context window" aria-haspopup="dialog" aria-controls="context-popover" aria-expanded={contextOpen} onClick={() => { setAttachMenu(false); setContextOpen(value => !value); }}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 1 8 8" /></svg></button>{contextOpen && <section ref={contextPanel} tabIndex={-1} className="context-popover" id="context-popover" role="dialog" aria-labelledby="context-title"><header><h2 id="context-title">Session info</h2><button type="button" aria-label="Close session info" onClick={() => { setContextOpen(false); contextButton.current?.focus(); }}>×</button></header><ContextInfo preview={preview} lastContext={chat.lastContext} loading={previewLoading} error={previewError} /><p>Compact conversation retains the last four user turns and excludes earlier turns from future requests. It does not create a summary or delete visible history.</p><button type="button" className="secondary" disabled={busy || compactBoundary(chat.messages) <= contextStart(chat)} onClick={compactConversation}>Compact conversation</button></section>}</div><button className="primary composer-send" type="submit" aria-label={chat.pending ? 'Sending message' : 'Send message'} title={!projectReady(chat) ? chat.needsReconnect ? "Reconnect project first" : "Select project first" : "Send message"} disabled={busy || !projectReady(chat) || (!chat.draft.trim() && !chat.attachments?.length) || chat.messages.length >= MAX_MESSAGES}><span aria-hidden="true">{chat.pending ? '…' : '↑'}</span></button></div></div></form>
+        <form className="project-composer" onSubmit={send}><Attachments items={chat.attachments} onPreview={previewAttachment} disabled={busy} remove={index => patch(chat.id, { attachments: chat.attachments.filter((_, i) => i !== index) })} /><label className="sr-only" htmlFor="project-prompt">Message about your project</label><textarea id="project-prompt" placeholder="Ask about your project..." value={chat.draft} disabled={busy} maxLength={10000} onChange={e => patch(chat.id, { draft: e.target.value })} onKeyDown={e => handleComposerKeydown(e, { busy })} /><div className="composer-actions"><div className="attach-control"><button type="button" className="attach-toggle" aria-label="Add attachment or browser snapshot" aria-expanded={attachMenu} aria-haspopup="menu" disabled={busy} onClick={() => setAttachMenu(!attachMenu)}>+</button>{attachMenu && <div className="attach-menu" role="menu" onKeyDown={event => menuKeydown(event, () => { setAttachMenu(false); document.querySelector('.attach-toggle')?.focus(); })}><button type="button" role="menuitem" disabled={busy || chat.attachments?.length >= MAX_ATTACHMENTS} onClick={() => { setAttachMenu(false); attachmentPicker.current.click(); }}>Attach files</button><button type="button" role="menuitem" disabled={frozen} aria-describedby="snapshot-reason" onClick={() => { setAttachMenu(false); picker.current.click(); }}>Choose browser snapshot</button><small id="snapshot-reason">{chat.messages.length ? 'Snapshot is frozen after the first message. Start a new chat to switch.' : chat.workspace_id ? 'A local workspace is connected. Start a new chat for a browser snapshot.' : 'Select a folder to review its source files.'}</small></div>}</div><div className="composer-right"><ModelPicker settings={settings} catalog={modelCatalog} onOpen={onModelOpen} onReload={onModelReload} onSelect={onModelSelect} disabled={chats.some(item => item.pending) || !storageReady} /><div className="context-control"><button ref={contextButton} type="button" className="context-toggle" aria-label="Session info and context window" title="Session info and context window" aria-haspopup="dialog" aria-controls="context-popover" aria-expanded={contextOpen} onClick={() => { setAttachMenu(false); setContextOpen(value => !value); }}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 1 8 8" /></svg></button>{contextOpen && <section ref={contextPanel} tabIndex={-1} className="context-popover" id="context-popover" role="dialog" aria-labelledby="context-title"><header><h2 id="context-title">Session info</h2><button type="button" aria-label="Close session info" onClick={() => { setContextOpen(false); contextButton.current?.focus(); }}>×</button></header><ContextInfo preview={preview} lastContext={chat.lastContext} loading={previewLoading} error={previewError} /><p>Compact conversation retains the last four user turns and excludes earlier turns from future requests. It does not create a summary or delete visible history.</p><button type="button" className="secondary" disabled={busy || compactBoundary(chat.messages) <= contextStart(chat)} onClick={compactConversation}>Compact conversation</button></section>}</div><button className="primary composer-send" type="submit" aria-label={chat.pending ? 'Sending message' : 'Send message'} title={!projectReady(chat) ? chat.needsReconnect ? "Reconnect project first" : "Select project first" : "Send message"} disabled={busy || !projectReady(chat) || (!chat.draft.trim() && !chat.attachments?.length) || chat.messages.length >= MAX_MESSAGES}><span aria-hidden="true">{chat.pending ? '…' : '↑'}</span></button></div></div></form>
         <details className="project-disclosure"><summary>Prepared locally · shared only on Send</summary><p>Attachments are parsed by the local backend before sending; no provider receives them until Send. On Send, attachments, eligible local workspace contents (or selected browser snapshot files) and this chat go through the local backend to your chosen provider{settings.mode === '9router' ? ' via 9router' : ''}. Local edits and commands require separate explicit approval. Commands are not sandboxed. Verify AI advice.</p></details>
       </div>
+      {filePreview && <FilePreview key={chat.id} state={filePreview} files={filePreview.files || []} onSelect={openFilePreview} onClose={closeFilePreview} />}
     </main>
   </div>;
 }

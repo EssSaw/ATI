@@ -91,7 +91,7 @@ Extracted document/text content is limited to 100,000 characters by the backend;
 
 The small circle beside Send opens **Session info**. Its debounced, abortable local-backend preview includes selected project files, active conversation history, prepared attachments, and the draft; a blank draft uses a single `Context preview` user placeholder without hiding attachments. Preview needs no provider key and never calls the provider. The breakdown covers system, tools, project, messages, attachments and tool results; estimates are approximate, not exact tokenizer counts. Before the server responds, the lower-bound browser estimate counts UTF-8 bytes / 3 and 1,024 tokens per image; unavailable server overhead is explicitly labeled. Local workspace contents are not duplicated in the browser request. Returned context is shown as **Last request** (excluding the current draft), with any automatically omitted older messages reported without deleting saved history.
 
-**Chat settings** exposes a persisted, non-secret context window (default 32,768; integer 8,192–2,000,000) and response reserve (default 4,096; integer 512–32,768 and smaller than the window). Model names never imply a million-token budget. Requests send `context_window` and `response_reserved` at the top level. The server budgets history rather than enforcing a 30-message limit.
+**Chat settings** exposes a persisted, non-secret context window (default 32,768; integer 8,192–2,000,000) and response reserve (default 4,096; integer 512–200,000 and smaller than the window; this is a budget, not a guarantee the selected model can emit that many tokens). Selecting a 9router model automatically uses its advertised `context_length` and `max_completion_tokens` when both are present and valid; you can still edit the budget afterward. Missing metadata or direct providers retain your manual settings. Model names alone never imply a million-token budget. Requests send `context_window` and `response_reserved` at the top level. The server budgets history rather than enforcing a 30-message limit.
 
 **Compact conversation** retains the last four user turns in future requests using a persisted, clamped `contextStart` boundary. Earlier messages stay visible and saved, with an **Earlier messages not sent** banner. This is not summarization. Compaction clears last-request metadata and refreshes the preview. Autosave retains up to 500 messages per conversation as a storage safety bound, not a user context limit; start another chat at that bound. Attachment requests retain their separate 12-attachment history safety limit (6 per message); compact older attachment turns, remove draft attachments, or start a new conversation when exceeded. No hidden attachments are silently discarded.
 
@@ -102,3 +102,34 @@ The compact composer model button shows the exact active ID. Open it to search t
 Drop documents or images on the conversation/composer, or use Attach files; both use the same preparation pipeline and six-file/size/type limits. Directories are rejected with a folder-picker reminder. Busy drops are ignored with a notice; preparation remains bound to its original chat when switching chats.
 
 A persistent header callout guides every chat without selected project files to Select project. Attachments do not count as a directory: Send requires a connected workspace or selected snapshot source. Empty/deselected snapshots retain the tutorial. Restored local projects display a persistent Reconnect reminder and cannot send until explicitly reconnected.
+
+### Rich messages and file preview
+
+Assistant replies use `react-markdown` with `remark-gfm` for headings, emphasis,
+lists/tasks, tables, and fenced code with language labels and copy feedback.
+Raw HTML is shown as text, never executed. Markdown images are blocked (including
+remote tracking images); external HTTP(S)/mail links require a click and use
+`noopener noreferrer`. Only prepared PNG/JPEG/WEBP data images are displayed.
+
+Use **Preview files** in the conversation header to browse selected project files,
+or click an exact eligible path rendered as inline code/a Markdown link. Unknown
+paths never trigger a filesystem read. Browser folders show their selected saved
+snapshot. Connected local workspaces explicitly fetch the bounded allowed snapshot
+on opening/selecting a project preview, not automatically or through the provider.
+The current backend uses `workspace_id` as its capability; preview also sends it as
+`token`, or uses a separate `token` returned by connection when available. Preview
+capabilities are kept only in memory and reconnect is required after reload.
+Snapshots are not live views and can be stale after disk edits.
+
+Draft and sent attachment cards open the same pane. Text/code stays selectable
+plain text (HTML/SVG/scripts are never executed); copy/download preserves its text.
+PDF/DOCX show **Extracted document text**, not a rendered original. Their downloads
+are `.txt` because original bytes are unavailable. Image downloads use the actual
+safe data URL. Desktop keeps the composer beneath the conversation beside the pane;
+mobile uses a full-width modal with Escape/close, focus containment and return.
+Preview selection/content is ephemeral, reset on chat changes, and never autosaved.
+
+`npm test` includes actual Chrome fixtures (1280px/390px) for formatting, escaped
+HTML, blocked images, local capability mock, existing browser files, attachments,
+extracted downloads, responsive layout, close/reopen, and reconnect isolation.
+Chrome fixtures skip when Google Chrome is not installed at the macOS test path.

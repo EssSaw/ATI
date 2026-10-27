@@ -207,16 +207,28 @@ def test_project_chat_request_bounds(client):
     )
     assert res.status_code == 422
 
-    # response_reserved > 32768
+    # response_reserved > 200000
     res = client.post(
         "/agent/project-chat/context",
         json={
             "context_window": 65536,
-            "response_reserved": 32769,
+            "response_reserved": 200001,
             "messages": [{"role": "user", "content": "Hi"}],
         },
     )
     assert res.status_code == 422
+
+    # A 1M context with a 200k response reserve is valid.
+    res = client.post(
+        "/agent/project-chat/context",
+        json={
+            "context_window": 1000000,
+            "response_reserved": 200000,
+            "messages": [{"role": "user", "content": "Hi"}],
+        },
+    )
+    assert res.status_code == 200
+    assert res.json()["context"]["reserved_tokens"] == 200000
 
     # response_reserved >= context_window
     res = client.post(

@@ -1,12 +1,13 @@
 export const DEFAULT_CONTEXT_WINDOW = 32768;
 export const DEFAULT_RESPONSE_RESERVED = 4096;
+export const MAX_RESPONSE_RESERVED = 200000;
 export const CONTEXT_PARTS = ['system', 'tools', 'project', 'messages', 'attachments', 'tool_results'];
 
 export function validateBudget(settings) {
   const window = settings.context_window ?? DEFAULT_CONTEXT_WINDOW;
   const reserve = settings.response_reserved ?? DEFAULT_RESPONSE_RESERVED;
   if (!Number.isInteger(window) || window < 8192 || window > 2000000) return 'Context window must be an integer from 8,192 to 2,000,000 tokens.';
-  if (!Number.isInteger(reserve) || reserve < 512 || reserve > 32768 || reserve >= window) return 'Response reserve must be an integer from 512 to 32,768 tokens and smaller than the context window.';
+  if (!Number.isInteger(reserve) || reserve < 512 || reserve > MAX_RESPONSE_RESERVED || reserve >= window) return 'Response reserve must be an integer from 512 to 200,000 tokens and smaller than the context window.';
   return '';
 }
 export function contextStart(chat) {

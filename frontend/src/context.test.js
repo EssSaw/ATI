@@ -12,7 +12,8 @@ const context = { window_tokens: 32768, reserved_tokens: 4096, estimated_tokens:
 test('explicit budget validates integers and is saved without any secret or model-name inference', () => {
   assert.equal(defaults.context_window, 32768);
   assert.equal(defaults.response_reserved, 4096);
-  for (const settings of [{ context_window: 8191 }, { context_window: 2000001 }, { context_window: 9000.5 }, { response_reserved: 511 }, { response_reserved: 32769 }, { context_window: 8192, response_reserved: 8192 }]) assert.ok(validateBudget(settings));
+  for (const settings of [{ context_window: 8191 }, { context_window: 2000001 }, { context_window: 9000.5 }, { response_reserved: 511 }, { response_reserved: 200001 }, { context_window: 8192, response_reserved: 8192 }]) assert.ok(validateBudget(settings));
+  assert.equal(validateBudget({ context_window: 1000000, response_reserved: 200000 }), '');
   assert.equal(validateBudget({ context_window: 2000000, response_reserved: 32768 }), '');
   const payload = projectPayload(chat, { model: 'model-1M', api_key: 'secret' });
   assert.equal(payload.context_window, 32768);
