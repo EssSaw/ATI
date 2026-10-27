@@ -50,10 +50,15 @@ test('catalog handles empty, malformed, and failed responses', async () => {
   }
 });
 test('preferences never include either secret', () => {
-  const saved = preferences({ ...defaults, api_key: 'secret-a', router_api_key: 'secret-b', extra: 'secret-c' });
+  const saved = preferences({ ...defaults, api_key: 'secret-a', router_api_key: 'secret-b', extra: 'secret-c', compiler_api_key: 'secret-d' });
   assert.equal(JSON.stringify(saved).includes('secret'), false);
   assert.equal('api_key' in saved, false);
   assert.equal('router_api_key' in saved, false);
+  assert.equal('compiler_api_key' in saved, false);
+  assert.equal(saved.compiler_mode, 'browser');
+  assert.equal(saved.compiler_base_url, '');
+  assert.equal(saved.compiler_rapidapi_host, '');
+  assert.deepEqual(Object.keys(saved).sort(), ['mode', 'provider', 'base_url', 'model', 'router_base_url', 'router_model', 'compiler_mode', 'compiler_base_url', 'compiler_rapidapi_host', 'context_window', 'response_reserved'].sort());
 });
 test('validates selected route without requiring inactive credentials', () => {
   assert.match(validateSettings(defaults), /API key/);

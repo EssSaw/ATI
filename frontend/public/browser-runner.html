@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Browser Code Runner Sandbox</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://cdn.jsdelivr.net/pyodide/ blob: data:; connect-src https://cdn.jsdelivr.net/pyodide/; worker-src 'self' blob: data:; style-src 'unsafe-inline';">
+</head>
+<body>
+  <script>
+    (function () {
+      'use strict';
+
+      const OUTPUT_CAP = 65536; // 64 KB
+      const PYODIDE_INDEX_URL = 'https://cdn.jsdelivr.net/pyodide/v0.26.4/full/';
+      const PYODIDE_SCRIPT_URL = 'https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js';
+
+      let activeWorker = null;
+
+      function notifyParent(msg) {
+        try {
+          if (window.parent && window.parent !== window) {
+            window.parent.postMessage(msg, '*');
+          }
+        } catch (_) {}
+      }
+
+      function createStdinReader(stdin) {
+        const lines = (stdin || '').split(/\r?\n/);
+        let index = 0;
+        return {
+          readline() {
+            return index < lines.length ? lines[index++] : '';
+          },
+          input() {
+            return index < lines.length ? lines[index++] : '';
+          },
+          read() {
+            if (index >= lines.length) return '';
+            const rest = lines.slice(index).join('\n');
+            index = lines.length;
+            return rest;
+          }
+        };
+      }
+
+      // Worker script content for JavaScript
+      const jsWorkerScript = `
+        const OUTPUT_CAP = 65536;
+        self.onmessage = async (e) => {
+          const { runId, source, stdin } = e.data;
+          const startTime = performance.now();
+          let stdout = '';
+          let stderr = '';
+          let truncated = false;
+
+          function append(str, isErr) {
+            if (isErr) {
+              if (stderr.length < OUTPUT_CAP) {
+                stderr += str;
+                if (stderr.length > OUTPUT_CAP) {
+                  stderr = stderr.slice(0, OUTPUT_CAP);
+                  truncated = true;
+                }
+              } else {
+                truncated = true;
+              }
+            } else {
+              if (stdout.length < OUTPUT_CAP) {
+                stdout += str;
+                if (stdout.length > OUTPUT_CAP) {
+                  stdout = stdout.slice(0, OUTPUT_CAP);
+                  truncated = true;
+                }
+              } else {
+                truncated = true;
+              }
+            }
+          }
+
+          function formatArg(a) {
+            if (typeof a === 'string') return a;
+            try { return JSON.stringify(a, null, 2); } catch (_) { return String(a); }
+          }
+
+          const customConsole = {
+            log: (...args) => append(args.map(formatArg).join(' ') + '\\n', false),
+            info: (...args) => append(args.map(formatArg).join(' ') + '\\n', false),
+            warn: (...args) => append(args.map(formatArg).join(' ') + '\\n', true),
+            error: (...args) => append(args.map(formatArg).join(' ') + '\\n', true),
+          };
+
+          const lines = (stdin || '').split(/\\r?\\n/);
+          let index = 0;
+          function readline() {
+            return index < lines.length ? lines[index++] : '';
+          }
+          function input() {
+            return readline();
+          }
+          function read() {
+            if (index >= lines.length) return '';
+            const rest = lines.slice(index).join('\\n');
+            index = lines.length;
+            return rest;
+          }
+
+          try {
+            let userFn;
+            try {
+              userFn = new Function(
+                'console', 'readline', 'input', 'read',
+                'return (async () => {\\n' + source + '\\n})();'
+              );
+            } catch (compileErr) {
+              const time = ((performance.now() - startTime) / 1000).toFixed(3);
+              self.postMessage({
+                type: 'result',
+                runId,
+                result: {
+                  status: { id: 6, description: 'Compilation Error' },
+                  stdout: '',
+                  stderr: '',
+                  compile_output: compileErr?.message || String(compileErr),
+                  message: '',
+                  exit_code: null,
+                  time,
+                  memory: null,
+                  truncated: false
+                }
+              });
+              return;
+            }
+
+            await userFn(customConsole, readline, input, read);
+            const time = ((performance.now() - startTime) / 1000).toFixed(3);
+            self.postMessage({
+              type: 'result',
+              runId,
+              result: {
+                status: { id: 3, description: 'Accepted' },
+                stdout,
+                stderr,
+                compile_output: '',
+                message: '',
+                exit_code: 0,
+                time,
+                memory: null,
+                truncated
+              }
+            });
+          } catch (runtimeErr) {
+            const time = ((performance.now() - startTime) / 1000).toFixed(3);
+            const errText = runtimeErr?.stack || runtimeErr?.message || String(runtimeErr);
+            self.postMessage({
+              type: 'result',
+              runId,
+              result: {
+                status: { id: 11, description: 'Runtime Error (NZEC)' },
+                stdout,
+                stderr: stderr ? stderr + '\\n' + errText : errText,
+                compile_output: '',
+                message: runtimeErr?.message || 'Runtime error',
+                exit_code: 1,
+                time,
+                memory: null,
+                truncated
+              }
+            });
+          }
+        };
+      `;
+
+      // Worker script content for Python
+      const pythonWorkerScript = `
+        const OUTPUT_CAP = 65536;
+        let pyodideInstance = null;
+
+        self.onmessage = async (e) => {
+          const { runId, source, stdin, scriptUrl, indexUrl } = e.data;
+
+          try {
+            if (!pyodideInstance) {
+              self.postMessage({ type: 'status', runId, stage: 'booting', message: 'Downloading and initializing Pyodide...' });
+              importScripts(scriptUrl);
+              pyodideInstance = await loadPyodide({ indexURL: indexUrl });
+            }
+
+            self.postMessage({ type: 'status', runId, stage: 'running', message: 'Running Python code...' });
+
+            const startTime = performance.now();
+            let stdout = '';
+            let stderr = '';
+            let truncated = false;
+
+            function append(str, isErr) {
+              if (isErr) {
+                if (stderr.length < OUTPUT_CAP) {
+                  stderr += str;
+                  if (stderr.length > OUTPUT_CAP) {
+                    stderr = stderr.slice(0, OUTPUT_CAP);
+                    truncated = true;
+                  }
+                } else {
+                  truncated = true;
+                }
+              } else {
+                if (stdout.length < OUTPUT_CAP) {
+                  stdout += str;
+                  if (stdout.length > OUTPUT_CAP) {
+                    stdout = stdout.slice(0, OUTPUT_CAP);
+                    truncated = true;
+                  }
+                } else {
+                  truncated = true;
+                }
+              }
+            }
+
+            pyodideInstance.setStdout({ batched: (msg) => append(msg + '\\n', false) });
+            pyodideInstance.setStderr({ batched: (msg) => append(msg + '\\n', true) });
+
+            pyodideInstance.globals.set('__stdin_buffer__', stdin || '');
+            pyodideInstance.runPython('import sys, io\\nsys.stdin = io.StringIO(__stdin_buffer__)');
+
+            try {
+              pyodideInstance.runPython(source);
+              const time = ((performance.now() - startTime) / 1000).toFixed(3);
+              self.postMessage({
+                type: 'result',
+                runId,
+                result: {
+                  status: { id: 3, description: 'Accepted' },
+                  stdout,
+                  stderr,
+                  compile_output: '',
+                  message: '',
+                  exit_code: 0,
+                  time,
+                  memory: null,
+                  truncated
+                }
+              });
+            } catch (pyErr) {
+              const time = ((performance.now() - startTime) / 1000).toFixed(3);
+              const errStr = pyErr?.message || String(pyErr);
+              const isSyntax = pyErr?.type === 'SyntaxError' || /SyntaxError:/.test(errStr);
+              if (isSyntax) {
+                self.postMessage({
+                  type: 'result',
+                  runId,
+                  result: {
+                    status: { id: 6, description: 'Compilation Error' },
+                    stdout: '',
+                    stderr: '',
+                    compile_output: errStr,
+                    message: '',
+                    exit_code: null,
+                    time,
+                    memory: null,
+                    truncated: false
+                  }
+                });
+              } else {
+                self.postMessage({
+                  type: 'result',
+                  runId,
+                  result: {
+                    status: { id: 11, description: 'Runtime Error (NZEC)' },
+                    stdout,
+                    stderr: stderr ? stderr + '\\n' + errStr : errStr,
+                    compile_output: '',
+                    message: pyErr?.message || 'Runtime error',
+                    exit_code: 1,
+                    time,
+                    memory: null,
+                    truncated
+                  }
+                });
+              }
+            }
+          } catch (bootErr) {
+            self.postMessage({
+              type: 'error',
+              runId,
+              message: bootErr?.message || 'Pyodide initialization failed'
+            });
+          }
+        };
+      `;
+
+      async function handleRun(data) {
+        const { runId, language, source, stdin } = data;
+
+        if (language === 'javascript') {
+          notifyParent({ type: 'status', runId, stage: 'running', message: 'Running JavaScript...' });
+
+          try {
+            const blob = new Blob([jsWorkerScript], { type: 'application/javascript' });
+            const workerUrl = URL.createObjectURL(blob);
+            const worker = new Worker(workerUrl);
+            activeWorker = worker;
+
+            worker.onmessage = (e) => {
+              notifyParent(e.data);
+              worker.terminate();
+              activeWorker = null;
+              URL.revokeObjectURL(workerUrl);
+            };
+
+            worker.onerror = (e) => {
+              notifyParent({
+                type: 'result',
+                runId,
+                result: {
+                  status: { id: 11, description: 'Runtime Error (NZEC)' },
+                  stdout: '',
+                  stderr: e.message || 'Worker runtime error',
+                  compile_output: '',
+                  message: e.message || 'Worker error',
+                  exit_code: 1,
+                  time: null,
+                  memory: null,
+                  truncated: false
+                }
+              });
+              worker.terminate();
+              activeWorker = null;
+              URL.revokeObjectURL(workerUrl);
+            };
+
+            worker.postMessage({ runId, source, stdin });
+          } catch (workerErr) {
+            notifyParent({ type: 'error', runId, message: 'Isolated browser workers are unavailable. Try a supported browser or optional Judge0 mode.' });
+          }
+        } else if (language === 'python') {
+          try {
+            const blob = new Blob([pythonWorkerScript], { type: 'application/javascript' });
+            const workerUrl = URL.createObjectURL(blob);
+            const worker = new Worker(workerUrl);
+            activeWorker = worker;
+
+            worker.onmessage = (e) => {
+              if (e.data && e.data.type === 'status') {
+                notifyParent(e.data);
+              } else {
+                notifyParent(e.data);
+                worker.terminate();
+                activeWorker = null;
+                URL.revokeObjectURL(workerUrl);
+              }
+            };
+
+            worker.onerror = (e) => {
+              notifyParent({
+                type: 'result',
+                runId,
+                result: {
+                  status: { id: 11, description: 'Runtime Error (NZEC)' },
+                  stdout: '',
+                  stderr: e.message || 'Python worker error',
+                  compile_output: '',
+                  message: e.message || 'Worker error',
+                  exit_code: 1,
+                  time: null,
+                  memory: null,
+                  truncated: false
+                }
+              });
+              worker.terminate();
+              activeWorker = null;
+              URL.revokeObjectURL(workerUrl);
+            };
+
+            worker.postMessage({
+              runId,
+              source,
+              stdin,
+              scriptUrl: PYODIDE_SCRIPT_URL,
+              indexUrl: PYODIDE_INDEX_URL
+            });
+          } catch (workerErr) {
+            notifyParent({ type: 'error', runId, message: 'Isolated browser workers are unavailable. Try a supported browser or optional Judge0 mode.' });
+          }
+        }
+      }
+
+      window.addEventListener('message', (event) => {
+        if (event.source !== window.parent) return;
+        const data = event.data;
+        if (!data || data.type !== 'run' || !data.runId) return;
+        handleRun(data);
+      });
+
+      notifyParent({ type: 'ready' });
+    })();
+  </script>
+</body>
+</html>

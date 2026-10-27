@@ -1,15 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { defaults, example, preferences, providers, validateSettings } from './state.js';
+import { defaults, preferences, providers, validateSettings } from './state.js';
+import { validateBudget } from './context.js';
 import { scheduleModelLoad } from './models.js';
 import './styles.css';
 import ProjectChat from './ProjectChat.jsx';
 import './project.css';
+import Compiler from './Compiler.jsx';
+import { validateCompilerSettings } from './compiler.js';
 
 function loadSettings() {
   try {
     const stored = JSON.parse(localStorage.getItem('codebook-preferences') || '{}');
-    const candidate = { ...defaults, ...preferences({ ...defaults, ...stored }), api_key: '', router_api_key: '' };
+    const candidate = { ...defaults, ...preferences({ ...defaults, ...stored }), api_key: '', router_api_key: '', compiler_api_key: '' };
+    if (!['browser', 'judge0'].includes(candidate.compiler_mode)) candidate.compiler_mode = 'browser';
+    if (validateBudget(candidate)) { candidate.context_window = defaults.context_window; candidate.response_reserved = defaults.response_reserved; }
     return ['direct', '9router'].includes(candidate.mode) && providers[candidate.provider] ? candidate : { ...defaults };
   } catch { return { ...defaults }; }
 }
@@ -23,102 +28,66 @@ async function request(path, body, signal) {
 function App() {
   const [view, setView] = useState('project');
   const [settings, setSettings] = useState(loadSettings);
-  const [code, setCode] = useState(example);
-  const [question, setQuestion] = useState('Why does this crash, and how can I include students scoring exactly 60?');
-  const [result, setResult] = useState(null);
-  const [busy, setBusy] = useState('');
+  const [compilerOpened, setCompilerOpened] = useState(false);
   const [error, setError] = useState('');
-  const [messages, setMessages] = useState([]);
-  const [message, setMessage] = useState('');
-  const [tab, setTab] = useState('report');
   const [health, setHealth] = useState('Checking backend');
-  const [copied, setCopied] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState('chat');
   const [catalog, setCatalog] = useState({ models: [], status: 'idle', error: '' });
   const [reloadModels, setReloadModels] = useState(0);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [chatPending, setChatPending] = useState(false);
   const cancelModels = useRef(() => {});
   const dialog = useRef(null);
-  const lines = useRef(null);
-  const lock = useRef(false);
   useEffect(() => {
     fetch('/health').then(r => r.ok ? r.json() : Promise.reject()).then(d => setHealth(d.status === 'ok' ? 'Backend connected' : 'Backend unavailable')).catch(() => setHealth('Backend unavailable'));
   }, []);
   useEffect(() => {
-    if (!settingsOpen || settings.mode !== '9router') return;
+    if ((!pickerOpen && (!settingsOpen || settingsTab !== 'chat')) || settings.mode !== '9router') return;
     setCatalog({ models: [], status: 'loading', error: '' });
     const cancel = scheduleModelLoad(request, settings, setCatalog);
     cancelModels.current = cancel;
     return cancel;
-  }, [settingsOpen, settings.mode, settings.router_base_url, settings.router_api_key, reloadModels]);
+  }, [pickerOpen, settingsOpen, settingsTab, settings.mode, settings.router_base_url, settings.router_api_key, reloadModels]);
   function clearCatalog() {
     cancelModels.current();
     setCatalog({ models: [], status: 'loading', error: '' });
   }
-  function openSettings() { clearCatalog(); setSettingsOpen(true); dialog.current.showModal(); }
+  function openSettings(tab) { clearCatalog(); setSettingsTab(tab); setError(''); setSettingsOpen(true); dialog.current.showModal(); }
+  function selectSettingsTab(tab) { cancelModels.current(); setSettingsTab(tab); setError(''); }
+  function navigateSettingsTabs(event) {
+    const tabs = [...event.currentTarget.querySelectorAll('[role=tab]')];
+    const index = tabs.indexOf(event.target);
+    if (index < 0 || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    tabs[next].click(); tabs[next].focus();
+  }
   function closeSettings() { cancelModels.current(); setSettingsOpen(false); dialog.current.close(); }
+  function selectModel(id) {
+    if (chatPending || !id.trim()) return;
+    setSettings(current => {
+      const next = { ...current, [current.mode === '9router' ? 'router_model' : 'model']: id };
+      try { localStorage.setItem('codebook-preferences', JSON.stringify(preferences(next))); } catch { /* Storage is optional. */ }
+      return next;
+    });
+  }
   function update(key, value) {
     if (['mode', 'router_base_url', 'router_api_key'].includes(key)) clearCatalog();
     setSettings(s => ({ ...s, [key]: value }));
   }
   function saveSettings(event) {
     event.preventDefault();
-    const invalid = validateSettings(settings);
+    const invalid = settingsTab === 'compiler' ? validateCompilerSettings(settings) : validateSettings(settings);
     if (invalid) { setError(invalid); return; }
     try { localStorage.setItem('codebook-preferences', JSON.stringify(preferences(settings))); } catch { /* Preferences are optional when browser storage is unavailable. */ }
     setError(''); closeSettings();
   }
-  async function run(event) {
-    event.preventDefault();
-    if (lock.current || !code.trim()) return;
-    const invalid = validateSettings(settings);
-    if (invalid) { setError(invalid); openSettings(); return; }
-    lock.current = true; setBusy('run'); setError(''); setResult(null); setMessages([]); setMessage(''); setTab('report'); setCopied(false);
-    try {
-      const data = await request('/agent/run', { code, question, settings });
-      if (!data.session_id || !data.report || !Array.isArray(data.report.bugs) || typeof data.report.fixed_code !== 'string' || !Array.isArray(data.trace)) throw new Error('The backend response is missing the report or trace. No analysis has been displayed.');
-      setResult(data);
-    } catch (e) { setError(e.message || 'Could not reach the local backend.'); }
-    finally { lock.current = false; setBusy(''); }
-  }
-  async function chat(event) {
-    event.preventDefault();
-    if (lock.current || !message.trim() || !result) return;
-    const invalid = validateSettings(settings);
-    if (invalid) { setError(invalid); openSettings(); return; }
-    const text = message.trim(); lock.current = true; setBusy('chat'); setError('');
-    try {
-      const data = await request('/agent/chat', { session_id: result.session_id, message: text, settings });
-      if (typeof data.reply !== 'string') throw new Error('The backend did not return a chat reply.');
-      setMessages(m => [...m, { role: 'You', text }, { role: 'Codebook', text: data.reply }]); setMessage('');
-    } catch (e) { setError(e.message || 'Could not send your message.'); }
-    finally { lock.current = false; setBusy(''); }
-  }
-  async function copyCode() {
-    try { await navigator.clipboard.writeText(result.report.fixed_code); setCopied(true); } catch { setError('Clipboard access is unavailable. Select and copy the corrected code manually.'); }
-  }
   const model = settings.mode === '9router' ? settings.router_model : settings.model;
   return <>
-    <ProjectChat hidden={view !== 'project'} settings={settings} request={request} openSettings={() => { setError(''); openSettings(); }} health={health} route={`${settings.mode === '9router' ? '9router' : providers[settings.provider].label} / ${model || 'Choose a model'}`} onReview={() => setView('review')} />
-    <div hidden={view !== 'review'}>
-    <button className="return-project" onClick={() => setView('project')}>← Project Chat</button>
-    <header className="masthead"><a className="brand" href="#main"><span className="brand-mark">c<span>:</span></span>codebook<span className="brand-label">STUDENT WORKBENCH</span></a><div className="header-actions"><span className={`health ${health === 'Backend connected' ? 'online' : ''}`}><i />{health}</span><button className="settings-button" onClick={() => { setError(''); openSettings(); }}>⚙ <span>Connection settings</span></button></div></header>
-    <main id="main">
-      <section className="intro"><div><p className="eyebrow">A LITTLE GUIDANCE. A LOT OF LEARNING.</p><h1>Understand the <em>why.</em><br />Then fix the code.</h1><p className="intro-copy">Your Python study partner. Find the bug, follow the reasoning,<br className="desktop-break" /> and leave with a better understanding—not just an answer.</p></div><aside className="lesson-note"><span className="note-number">01 / THE PROCESS</span><p>Write. Investigate.<br /><em>Learn something new.</em></p><span>Real tools. Clear explanations. Your code.</span></aside></section>
-      <div className="workspace-label"><span>YOUR WORKBENCH</span><span className="route-badge">{settings.mode === '9router' ? '9router' : providers[settings.provider].label} <span> / {model || 'Choose a model'}</span></span></div>
-      {error && !dialog.current?.open && <div className="error" role="alert"><strong>Something needs attention.</strong> {error}<button aria-label="Dismiss error" onClick={() => setError('')}>×</button></div>}
-      <div className="workspace">
-        <section className="panel editor-panel" aria-labelledby="editor-title"><form onSubmit={run}><div className="panel-heading"><div><span className="step">01</span><h2 id="editor-title">Your code</h2></div><span className="language"><i /> Python 3</span></div><div className="file-bar"><span>▤ &nbsp; practice.py</span><button type="button" disabled={!!busy} onClick={() => setCode(example)}>Reset example</button></div><div className="editor"><div className="line-numbers" ref={lines} aria-hidden="true">{code.split('\n').map((_, i) => <div key={i}>{i + 1}</div>)}</div><textarea aria-label="Python code" value={code} onChange={e => setCode(e.target.value)} onScroll={e => { lines.current.scrollTop = e.target.scrollTop; }} spellCheck="false" autoCapitalize="off" autoCorrect="off" wrap="off" disabled={!!busy} /></div><div className="question-area"><label htmlFor="question">What would you like to understand?<span>Optional</span></label><textarea id="question" value={question} onChange={e => setQuestion(e.target.value)} placeholder="Describe what you expected, or where you’re stuck…" disabled={!!busy} rows="2" /><div className="run-row"><span>Make mistakes.<br />That’s how you learn.</span><button className="primary" disabled={!!busy || !code.trim()}>{busy === 'run' ? <><span className="spinner" /> Analyzing…</> : <>Analyze code <span aria-hidden="true">↗</span></>}</button></div></div></form></section>
-        <section className="panel results-panel" aria-labelledby="results-title"><div className="panel-heading"><div><span className="step">02</span><h2 id="results-title">The learning report</h2></div>{result && <span className="duration">{(result.latency_ms / 1000).toFixed(1)}s</span>}</div><div className="tabs" role="tablist" aria-label="Analysis results">{[['report', 'Overview'], ['code', 'Corrected code'], ['trace', 'Agent trace']].map(([id, label]) => <button key={id} id={`tab-${id}`} role="tab" aria-selected={tab === id} aria-controls={`panel-${id}`} tabIndex={tab === id ? 0 : -1} onKeyDown={e => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { e.preventDefault(); const ids = ['report', 'code', 'trace']; const next = e.key === 'Home' ? 'report' : e.key === 'End' ? 'trace' : ids[(ids.indexOf(tab) + (e.key === 'ArrowRight' ? 1 : 2)) % 3]; setTab(next); document.getElementById(`tab-${next}`).focus(); } }} onClick={() => setTab(id)}>{label}{id === 'trace' && result && <span className="count">{result.trace.length}</span>}</button>)}</div>
-          <div className="result-body" id={`panel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`} tabIndex="0" aria-busy={busy === 'run'}>
-            {!result ? <div className="empty-state" role="status"><div className={`empty-icon ${busy === 'run' ? 'working' : ''}`}>{busy === 'run' ? '⌕' : '{ }'}</div><span className="eyebrow">{busy === 'run' ? 'INVESTIGATION IN PROGRESS' : 'A FRESH PAIR OF EYES'}</span><h3>{busy === 'run' ? 'Taking a closer look.' : 'Every bug has a lesson.'}</h3><p>{busy === 'run' ? 'Waiting for your backend to return its report. Actual tool calls will appear in Agent trace after the run completes.' : 'Add your connection settings, then analyze your code. Your findings, explanation, and corrected code will appear here.'}</p><div className="empty-checks"><span>01 &nbsp; Find the issue</span><span>02 &nbsp; Understand it</span><span>03 &nbsp; Try the fix</span></div></div> : tab === 'report' ? <><div className="report-summary"><span className="eyebrow">THE BIG PICTURE</span><h3>{result.report.summary}</h3><span className="finding-count">{result.report.bugs.length} finding{result.report.bugs.length !== 1 ? 's' : ''} to explore</span></div><div className="findings">{result.report.bugs.map((bug, i) => <article className="finding" key={i}><div><span className={`bug-type ${bug.type}`}>{bug.type}</span><span className="line-label">{bug.line == null ? 'General' : `Line ${bug.line}`}</span></div><h4>{bug.message}</h4><p>{bug.suggestion}</p></article>)}{!result.report.bugs.length && <p className="no-findings">No issues reported by this analysis. Keep testing your edge cases.</p>}</div><div className="explanation"><h3>Let’s unpack it</h3><p>{result.report.explanation}</p></div></> : tab === 'code' ? <><div className="code-heading"><p>A version to learn from.<br /><small>Review the changes before you use them.</small></p><button className="secondary" onClick={copyCode}>{copied ? 'Copied ✓' : 'Copy code'}</button></div><pre className="fixed-code" tabIndex="0"><code>{result.report.fixed_code}</code></pre></> : <><p className="trace-note">Actual tool calls returned by the backend—not a live simulation.</p>{result.trace.length ? <ol className="trace-list">{result.trace.map((item, i) => <li key={i}><span className="trace-index">{String(i + 1).padStart(2, '0')}</span><div><div className="trace-title"><strong>{item.tool}</strong><span>{item.duration_ms} ms</span></div><span className="tool-status">{item.status}</span><p>{item.detail}</p></div></li>)}</ol> : <p>No tool calls were reported for this run.</p>}<p className="tools-used">Tools used: {(result.tools_used || []).join(', ') || 'None reported'}</p></>}
-          </div>
-        </section>
-      </div>
-      <section className="chat-panel" aria-labelledby="chat-title"><div className="chat-heading"><span className="step">03</span><div><h2 id="chat-title">Keep asking questions.</h2><p>{result ? 'Continue with the context of this analysis.' : 'Your follow-up conversation starts after the first analysis.'}</p></div><span className="chat-decoration" aria-hidden="true">↳</span></div>{messages.length > 0 && <div className="messages" role="log" aria-label="Follow-up conversation">{messages.map((m, i) => <article className={`message ${m.role === 'You' ? 'user' : ''}`} key={i}><strong>{m.role}</strong><p>{m.text}</p></article>)}</div>}<form className="chat-form" onSubmit={chat}><label className="sr-only" htmlFor="followup">Follow-up question</label><input id="followup" value={message} onChange={e => setMessage(e.target.value)} disabled={!result || !!busy} placeholder="Why does an empty list cause this error?" /><button className="primary" disabled={!result || !!busy || !message.trim()}>{busy === 'chat' ? 'Thinking…' : 'Ask a follow-up'} <span aria-hidden="true">↑</span></button></form><p className="chat-footnote">New analysis, fresh conversation. Your questions stay tied to the current report.</p></section>
-      <footer><span><strong>Learn, don’t just copy.</strong> AI can make mistakes. Verify its suggestions.</span><span>Runtime execution is unavailable in this local build.<br />Code is analyzed, never executed on your host.</span></footer>
-    </main>
-    </div>
-    <dialog ref={dialog} onClose={() => { cancelModels.current(); setSettingsOpen(false); }} onCancel={closeSettings} className="settings-dialog" aria-labelledby="settings-title"><form onSubmit={saveSettings}><div className="dialog-heading"><div><span className="eyebrow">YOUR CONNECTION</span><h2 id="settings-title">Choose your study partner.</h2></div><button type="button" aria-label="Close settings" className="close" onClick={closeSettings}>×</button></div><p className="privacy-note">API keys stay in memory only—never in browser storage or URLs. They are sent only to the local backend and your chosen service. Reloading clears them.</p><fieldset disabled={!!busy}><legend>Connection mode</legend><div className="mode-switch">{['direct', '9router'].map(mode => <label key={mode} className={settings.mode === mode ? 'active' : ''}><input type="radio" name="mode" value={mode} checked={settings.mode === mode} onChange={() => update('mode', mode)} />{mode === 'direct' ? 'Direct provider' : '9router gateway'}</label>)}</div>{settings.mode === 'direct' ? <div className="setting-fields"><label>Provider<select value={settings.provider} onChange={e => setSettings(s => ({ ...s, provider: e.target.value, base_url: providers[e.target.value].base_url, model: providers[e.target.value].model, api_key: '' }))}>{Object.entries(providers).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}</select></label><label>API base URL<input type="url" required value={settings.base_url} onChange={e => update('base_url', e.target.value)} placeholder="https://api.example.com/v1" autoComplete="off" /></label><label>Model<input required value={settings.model} onChange={e => update('model', e.target.value)} placeholder="Provider model ID" /></label><label>Provider API key<input type="password" value={settings.api_key} onChange={e => update('api_key', e.target.value)} autoComplete="off" spellCheck="false" placeholder="Your key — cleared on reload" /></label></div> : <div className="setting-fields"><p className="router-note">Models load automatically from your gateway. Choose its exact model identifier, including the provider prefix.</p><label>9router base URL<input type="url" required value={settings.router_base_url} onChange={e => update('router_base_url', e.target.value)} autoComplete="off" /></label><label>9router model<select required value={settings.router_model} onChange={e => update('router_model', e.target.value)} aria-describedby="model-status" aria-busy={catalog.status === 'loading'}><option value="">Select a model</option>{settings.router_model && !catalog.models.includes(settings.router_model) && <option value={settings.router_model} disabled>{settings.router_model} (unavailable)</option>}{catalog.models.map(id => <option key={id} value={id}>{id}</option>)}</select></label><p id="model-status" role="status" className="router-note">{catalog.status === 'loading' ? 'Loading models...' : catalog.status === 'error' ? catalog.error : catalog.models.length ? 'Model catalog loaded. Your selection is not changed automatically.' : 'No models returned. Check your gateway configuration and reload.'}{settings.router_model && !catalog.models.includes(settings.router_model) && ' Your saved model is retained; select another model only if you want to change it.'}</p><button type="button" className="secondary" onClick={() => { clearCatalog(); setReloadModels(n => n + 1); }}>Reload models</button><label>9router API key<input type="password" value={settings.router_api_key} onChange={e => update('router_api_key', e.target.value)} autoComplete="off" spellCheck="false" placeholder="If your gateway requires a key" /></label></div>}</fieldset>{error && <p className="error" role="alert">{error}</p>}<div className="dialog-footer"><span>Only non-secret preferences are saved.</span><button className="primary" disabled={!!busy}>Use connection ↗</button></div></form></dialog>
+    <ProjectChat modelCatalog={catalog} onModelOpen={setPickerOpen} onModelReload={() => { clearCatalog(); setReloadModels(n => n + 1); }} onModelSelect={selectModel} onPendingChange={setChatPending} hidden={view !== 'project'} settings={settings} request={request} openSettings={() => openSettings('chat')} health={health} route={`${settings.mode === '9router' ? '9router' : providers[settings.provider].label} / ${model || 'Choose a model'}`} onCompiler={() => { setCompilerOpened(true); setView('compiler'); }} />
+    {compilerOpened && <Compiler compilerSettings={settings} hidden={view !== 'compiler'} onBack={() => setView('project')} openSettings={() => openSettings('compiler')} />}
+    <dialog ref={dialog} onClose={() => { cancelModels.current(); setSettingsOpen(false); }} onCancel={closeSettings} className="settings-dialog" aria-labelledby="settings-title"><form onSubmit={saveSettings} noValidate><div className="dialog-heading"><div><span className="eyebrow">YOUR CONNECTION</span><h2 id="settings-title">Connection settings.</h2></div><button type="button" aria-label="Close settings" className="close" onClick={closeSettings}>×</button></div><div className="settings-tabs" role="tablist" aria-label="Connection type" onKeyDown={navigateSettingsTabs}>{[['chat', 'Project Chat'], ['compiler', 'Compiler execution']].map(([id, label]) => <button key={id} type="button" role="tab" id={`settings-tab-${id}`} aria-controls={`settings-panel-${id}`} aria-selected={settingsTab === id} tabIndex={settingsTab === id ? 0 : -1} onClick={() => selectSettingsTab(id)}>{label}</button>)}</div><div className="settings-body"><p className="privacy-note">Project Chat and compiler connections are separate. Browser execution needs no key. API keys stay in memory only—never in browser storage or URLs. They are sent only to the local backend and your chosen service. Reloading clears them.</p><section role="tabpanel" id="settings-panel-chat" aria-labelledby="settings-tab-chat" hidden={settingsTab !== 'chat'}><fieldset disabled={chatPending}><legend>Project Chat connection</legend><div className="mode-switch">{['direct', '9router'].map(mode => <label key={mode} className={settings.mode === mode ? 'active' : ''}><input type="radio" name="mode" value={mode} checked={settings.mode === mode} onChange={() => update('mode', mode)} />{mode === 'direct' ? 'Direct provider' : '9router gateway'}</label>)}</div>{settings.mode === 'direct' ? <div className="setting-fields"><label>Provider<select value={settings.provider} onChange={e => setSettings(s => ({ ...s, provider: e.target.value, base_url: providers[e.target.value].base_url, model: providers[e.target.value].model, api_key: '' }))}>{Object.entries(providers).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}</select></label><label>API base URL<input type="url" required value={settings.base_url} onChange={e => update('base_url', e.target.value)} placeholder="https://api.example.com/v1" autoComplete="off" /></label><label>Model<input required value={settings.model} onChange={e => update('model', e.target.value)} placeholder="Provider model ID" /></label><label>Provider API key<input type="password" value={settings.api_key} onChange={e => update('api_key', e.target.value)} autoComplete="off" spellCheck="false" placeholder="Your key — cleared on reload" /></label></div> : <div className="setting-fields"><p className="router-note">Models load automatically from your gateway. Choose its exact model identifier, including the provider prefix.</p><label>9router base URL<input type="url" required value={settings.router_base_url} onChange={e => update('router_base_url', e.target.value)} autoComplete="off" /></label><label>9router model<select required value={settings.router_model} onChange={e => update('router_model', e.target.value)} aria-describedby="model-status" aria-busy={catalog.status === 'loading'}><option value="">Select a model</option>{settings.router_model && !catalog.models.includes(settings.router_model) && <option value={settings.router_model} disabled>{settings.router_model} (unavailable)</option>}{catalog.models.map(id => <option key={id} value={id}>{id}</option>)}</select></label><p id="model-status" role="status" className="router-note">{catalog.status === 'loading' ? 'Loading models...' : catalog.status === 'error' ? catalog.error : catalog.models.length ? 'Model catalog loaded. Your selection is not changed automatically.' : 'No models returned. Check your gateway configuration and reload.'}{settings.router_model && !catalog.models.includes(settings.router_model) && ' Your saved model is retained; select another model only if you want to change it.'}</p><button type="button" className="secondary" onClick={() => { clearCatalog(); setReloadModels(n => n + 1); }}>Reload models</button><label>9router API key<input type="password" value={settings.router_api_key} onChange={e => update('router_api_key', e.target.value)} autoComplete="off" spellCheck="false" placeholder="If your gateway requires a key" /></label></div>}</fieldset><fieldset className="context-settings"><legend>Chat context budget</legend><div className="setting-fields"><label>Context window (tokens)<input type="number" min="8192" max="2000000" step="1" value={settings.context_window} onChange={e => update('context_window', Number(e.target.value))} /></label><label>Response reserve (tokens)<input type="number" min="512" max="32768" step="1" value={settings.response_reserved} onChange={e => update('response_reserved', Number(e.target.value))} /></label></div><p className="router-note">Set your provider's actual limit. Model names do not determine the budget. Estimates are approximate, not tokenizer counts.</p></fieldset></section><section role="tabpanel" id="settings-panel-compiler" aria-labelledby="settings-tab-compiler" hidden={settingsTab !== 'compiler'}><fieldset className="compiler-settings"><legend>Compiler execution (separate from Project Chat)</legend><div className="setting-fields"><label>Execution mode<select value={settings.compiler_mode} onChange={e => update('compiler_mode', e.target.value)}><option value="browser">Browser - free JavaScript + Python, no key</option><option value="judge0">Judge0 - optional, bring your own connection</option></select></label><p className="router-note">Browser mode never calls the compiler API. Runtime assets download from a CDN; Python's first download is larger. Drafts and keys stay in memory.</p>{settings.compiler_mode === 'judge0' && <><label>Judge0 base URL<input type="url" value={settings.compiler_base_url} onChange={e => update('compiler_base_url', e.target.value)} placeholder="https://judge0-ce.p.rapidapi.com" autoComplete="off" /></label><label>Judge0 API key<input type="password" value={settings.compiler_api_key} onChange={e => update('compiler_api_key', e.target.value)} autoComplete="off" spellCheck="false" placeholder="Your Judge0 key - cleared on reload" /></label><label>RapidAPI host (optional)<input value={settings.compiler_rapidapi_host} onChange={e => update('compiler_rapidapi_host', e.target.value)} placeholder="judge0-ce.p.rapidapi.com" autoComplete="off" spellCheck="false" /></label><p className="router-note">Enter your own Judge0 endpoint and key. For RapidAPI, use https://judge0-ce.p.rapidapi.com and host judge0-ce.p.rapidapi.com. Leave host empty for a non-RapidAPI deployment. No default service or hidden fallback is used. Source and stdin go to this service through the local backend.</p></>}</div></fieldset></section>{error && <p className="error" role="alert">{error}</p>}</div><div className="dialog-footer"><span>Only non-secret preferences are saved.</span><button className="primary">Use {settingsTab === 'chat' ? 'chat' : 'compiler'} connection {'\u2197'}</button></div></form></dialog>
   </>;
 }
 

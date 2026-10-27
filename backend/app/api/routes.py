@@ -1,6 +1,7 @@
+import httpx
 from fastapi import APIRouter, HTTPException
 
-from ..config import PROVIDER_DEFAULTS, ROUTER_DEFAULT_BASE_URL, ROUTER_DEFAULT_MODEL
+from ..config import PROVIDER_DEFAULTS, ROUTER_DEFAULT_BASE_URL, ROUTER_DEFAULT_MODEL, resolve_settings
 from ..schemas import (
     AgentChatRequest,
     AgentChatResponse,
@@ -9,6 +10,9 @@ from ..schemas import (
     HealthResponse,
     ProviderPreset,
     ProvidersResponse,
+    RouterModelsRequest,
+    RouterModelsResponse,
+    Settings,
 )
 from ..sessions import session_store
 from ..agent import run_agent, run_chat
@@ -51,6 +55,44 @@ async def agent_chat(request: AgentChatRequest) -> AgentChatResponse:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Unexpected chat error: {type(exc).__name__}")
+
+
+@router.post("/agent/models", response_model=RouterModelsResponse)
+async def router_models(request: RouterModelsRequest) -> RouterModelsResponse:
+    try:
+        config = resolve_settings(Settings(mode="9router", **request.model_dump()))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid gateway base URL. Use an HTTP(S) URL without credentials or query parameters.")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+            response = await client.get(
+                f"{config.base_url}/models",
+                headers={"Authorization": "Bearer " + config.api_key},
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        raise HTTPException(
+            status_code=status if status in (401, 403, 404, 429) else 502,
+            detail=f"Gateway model listing returned HTTP {status}.",
+        )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Gateway model listing timed out.")
+    except httpx.RequestError:
+        raise HTTPException(status_code=502, detail="Could not connect to the gateway to load models.")
+
+    try:
+        data = response.json()["data"]
+        if not isinstance(data, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip()
+            for item in data
+        ):
+            raise ValueError()
+        models = sorted({item["id"] for item in data})
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(status_code=502, detail="Gateway returned an invalid model list.")
+    return RouterModelsResponse(models=models)
 
 
 @router.get("/providers", response_model=ProvidersResponse)

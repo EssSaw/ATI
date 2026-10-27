@@ -1,3 +1,4 @@
+import { validateBudget } from './context.js';
 export const providers = {
   openai: { label: 'OpenAI', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
   groq: { label: 'Groq', base_url: 'https://api.groq.com/openai/v1', model: 'llama-3.3-70b-versatile' },
@@ -5,12 +6,14 @@ export const providers = {
   openrouter: { label: 'OpenRouter', base_url: 'https://openrouter.ai/api/v1', model: 'openai/gpt-4o-mini' },
   custom: { label: 'Custom compatible API', base_url: '', model: '' },
 };
-export const defaults = { mode: 'direct', provider: 'openai', api_key: '', base_url: providers.openai.base_url, model: providers.openai.model, router_base_url: 'http://localhost:20128/v1', router_api_key: '', router_model: '' };
+export const defaults = { context_window: 32768, response_reserved: 4096, mode: 'direct', provider: 'openai', api_key: '', base_url: providers.openai.base_url, model: providers.openai.model, router_base_url: 'http://localhost:20128/v1', router_api_key: '', router_model: '', compiler_mode: 'browser', compiler_base_url: '', compiler_api_key: '', compiler_rapidapi_host: '' };
 export function preferences(settings) {
-  const { mode, provider, base_url, model, router_base_url, router_model } = settings;
-  return { mode, provider, base_url, model, router_base_url, router_model };
+  const { mode, provider, base_url, model, router_base_url, router_model, compiler_mode, compiler_base_url, compiler_rapidapi_host, context_window, response_reserved } = settings;
+  return { mode, provider, base_url, model, router_base_url, router_model, compiler_mode, compiler_base_url, compiler_rapidapi_host, context_window, response_reserved };
 }
 export function validateSettings(s) {
+  const invalid = validateBudget(s);
+  if (invalid) return invalid;
   const router = s.mode === '9router';
   if (!(router ? s.router_model : s.model).trim()) return 'Add a model name in connection settings.';
   try {

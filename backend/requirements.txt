@@ -5,3 +5,4 @@ pyflakes>=3.2.0
 pydantic>=2.8.0
 python-dotenv>=1.0.0
 pytest>=8.0.0
+pypdf>=4.0.0

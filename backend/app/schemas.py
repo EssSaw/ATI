@@ -41,6 +41,15 @@ class Settings(BaseModel):
     enable_code_execution: bool = False
 
 
+class RouterModelsRequest(BaseModel):
+    router_base_url: str = Field(default="", max_length=2048)
+    router_api_key: str = Field(default="", max_length=4096, repr=False)
+
+
+class RouterModelsResponse(BaseModel):
+    models: List[str]
+
+
 class AgentRunRequest(BaseModel):
     code: str = Field(..., max_length=50000, description="Python code submitted for analysis")
     question: str = Field(default="", max_length=5000, description="Optional student question or prompt")
