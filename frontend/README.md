@@ -97,7 +97,7 @@ The small circle beside Send opens **Session info**. Its debounced, abortable lo
 
 ### Chat model, drops and project readiness
 
-The compact composer model button shows the exact active ID. Open it to search the 9router catalog or edit a direct-provider ID with its current default as a suggestion. The picker shares the debounced `/agent/models` loader with connection settings; no provider switch or fallback model occurs. Selection persists only non-secret preferences, refreshes context estimates, and is disabled while a chat send is pending. Escape and outside click close the picker.
+The compact composer model button shows the exact active ID. Open it to search the 9router catalog or edit a direct-provider ID with its current default as a suggestion. The picker shares the debounced `/agent/models` loader with connection settings; no provider switch or fallback model occurs. In **Connection settings → Project Chat**, choose 9router, enter its base URL and optional gateway key, then use **Test connection & load models** to verify the gateway and populate the model list without needing a model first. You can save connection settings without a model, but must choose one before sending chat. The test only verifies the catalog endpoint, not inference or tool support. Selection persists only non-secret preferences, refreshes context estimates, and is disabled while a chat send is pending. Escape and outside click close the picker.
 
 Drop documents or images on the conversation/composer, or use Attach files; both use the same preparation pipeline and six-file/size/type limits. Directories are rejected with a folder-picker reminder. Busy drops are ignored with a notice; preparation remains bound to its original chat when switching chats.
 

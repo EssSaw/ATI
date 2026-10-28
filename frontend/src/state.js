@@ -11,17 +11,20 @@ export function preferences(settings) {
   const { mode, provider, base_url, model, router_base_url, router_model, compiler_mode, compiler_base_url, compiler_rapidapi_host, context_window, response_reserved } = settings;
   return { mode, provider, base_url, model, router_base_url, router_model, compiler_mode, compiler_base_url, compiler_rapidapi_host, context_window, response_reserved };
 }
-export function validateSettings(s) {
+export function validateConnectionSettings(s) {
   const invalid = validateBudget(s);
   if (invalid) return invalid;
   const router = s.mode === '9router';
-  if (!(router ? s.router_model : s.model).trim()) return 'Add a model name in connection settings.';
   try {
     const url = new URL(router ? s.router_base_url : s.base_url);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error();
   } catch { return 'Use an HTTP(S) base URL without credentials, query parameters, or a fragment.'; }
   if (!router && s.provider !== 'custom' && !s.api_key.trim()) return 'Add your provider API key in connection settings.';
+  if (!router && !s.model.trim()) return 'Add a model name in connection settings.';
   return '';
+}
+export function validateSettings(s) {
+  return validateConnectionSettings(s) || (s.mode === '9router' && !s.router_model.trim() ? 'Select a 9router model before sending. Use Test connection & load models in connection settings.' : '');
 }
 export const example = `def average_score(scores):
     total = 0

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defaults, preferences, validateSettings } from './state.js';
+import { defaults, preferences, validateConnectionSettings, validateSettings } from './state.js';
 import { applyModelLimits, scheduleModelLoad } from './models.js';
 import { setTimeout as wait } from 'node:timers/promises';
 
@@ -62,6 +62,8 @@ test('preferences never include either secret', () => {
 });
 test('validates selected route without requiring inactive credentials', () => {
   assert.match(validateSettings(defaults), /API key/);
+  assert.equal(validateConnectionSettings({ ...defaults, mode: '9router', router_model: '' }), '');
+  assert.match(validateSettings({ ...defaults, mode: '9router', router_model: '' }), /Select a 9router model before sending/);
   assert.equal(validateSettings({ ...defaults, mode: '9router', router_model: 'openai/gpt-4o-mini' }), '');
   assert.match(validateSettings({ ...defaults, api_key: 'x', base_url: 'https://secret@example.com/v1' }), /base URL/);
   assert.match(validateSettings({ ...defaults, api_key: 'x', base_url: 'https://example.com?key=secret' }), /base URL/);
